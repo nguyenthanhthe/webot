@@ -105,8 +105,10 @@ class Bot:
         # Watches the game for a patch that could break the protocol.
         self.updates = UpdateWatcher(cfg, self.http, self.auth.auth_headers())
         self._last_update_check = 0.0
-        # The day the process re-executed itself the last time.
-        self._last_restart_day = ""
+        # The day the process re-executed itself the last time.  It
+        # lives in the state dir: os.execv wipes the memory, and a
+        # marker only in RAM would restart the bot in a tight loop.
+        self._last_restart_day = self._load_restart_day()
 
     # ------------------------------------------------------------------
     def _load_device_id(self) -> str:
@@ -176,15 +178,32 @@ class Bot:
         today = time.strftime("%Y-%m-%d")
         return self._last_restart_day != today
 
+    def _load_restart_day(self) -> str:
+        try:
+            path = state_path("restart_day.txt")
+            if path.is_file():
+                return path.read_text(encoding="utf-8").strip()
+        except OSError:
+            pass
+        return ""
+
+    def _save_restart_day(self, day: str) -> None:
+        try:
+            state_path("restart_day.txt").write_text(day + "\n", encoding="utf-8")
+        except OSError as exc:
+            log.warning("could not record the restart day: %s", exc)
+
     def _reexec(self) -> None:
         """Replace the process with a fresh one, same command line.
 
         ``os.execv`` keeps the pid and the lock file valid, so the
-        service runner and the watchdog never notice.  The durable
-        credential lives on disk, so the fresh process authenticates by
-        itself.
+        service runner and the watchdog never notice.  The restart day
+        is recorded in the state dir BEFORE the exec - the fresh
+        process reads it and does not restart again.
         """
-        self._last_restart_day = time.strftime("%Y-%m-%d")
+        today = time.strftime("%Y-%m-%d")
+        self._save_restart_day(today)
+        self._last_restart_day = today
         self.log_event("bot", "daily restart - replacing the process")
         self.store.update(status="restarting")
         os.execv(sys.executable, [sys.executable, *sys.argv])
@@ -506,10 +525,16 @@ class Bot:
         return True
 
     def _claim_double_xp(self, sock: SocketIOClient) -> None:
+        """Claim the doubler when the server offers it.
+
+        The offer carries a cooldown of its own - most games answer
+        with canClaimDoubleXp false and nothing is sent.  Whether the
+        claim really doubled the award shows in the next profile read.
+        """
         try:
             sock.emit("videoAdClaimReward", {"adId": "DOUBLE_XP", "type": "XP_DOUBLER"})
             sock.emit("game-over-double-xp")
-            self.log_event("xp", "claimed double XP")
+            self.log_event("xp", "double XP claimed - the profile read confirms it")
         except Exception as exc:  # noqa: BLE001
             self.log_event("warn", f"double XP claim failed: {exc}")
 
@@ -657,6 +682,11 @@ class Bot:
             return
         kind = str(due[0].get("type") or "reward")
         amount = due[0].get("amount")
+        # One attempt per day per rung: a rung the server keeps
+        # refusing must not be posted again on every round.
+        if self._daily_claim_attempted(kind):
+            return
+        self._note_daily_claim_attempt(kind)
         try:
             result = rewards.claim_daily_reward()
         except Exception as exc:  # noqa: BLE001
@@ -666,6 +696,25 @@ class Bot:
         # refused must not read as a success.
         detail = json.dumps(result)[:200] if result else "server answered nothing"
         self.log_event("reward", f"daily reward {kind} x{amount} -> {detail}")
+
+    def _daily_claim_attempted(self, kind: str) -> bool:
+        """True when this rung was already tried today."""
+        return self._load_claim_marker() == f"{_day_key_now()}|{kind}"
+
+    def _note_daily_claim_attempt(self, kind: str) -> None:
+        self._save_claim_marker(f"{_day_key_now()}|{kind}")
+
+    def _load_claim_marker(self) -> str:
+        try:
+            return state_path("daily_claim.txt").read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
+
+    def _save_claim_marker(self, value: str) -> None:
+        try:
+            state_path("daily_claim.txt").write_text(value + "\n", encoding="utf-8")
+        except OSError as exc:
+            log.warning("could not record the daily claim attempt: %s", exc)
 
     @staticmethod
     def _reward_is_due(reward: dict[str, Any], now: datetime) -> bool:
@@ -986,6 +1035,11 @@ class Bot:
             sock.emit("game:chat-public:msg", {"msg": message})
         except Exception:  # noqa: BLE001
             pass
+
+
+def _day_key_now() -> str:
+    """The local day, used for the once-a-day claim marker."""
+    return time.strftime("%Y-%m-%d")
 
 
 def _parse_ban_until(value: str) -> float:
