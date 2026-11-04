@@ -103,6 +103,9 @@ class Config:
     # A game that sends no event for this long is treated as hung and
     # restarted.  A normal game sends a chat or vote event every minute.
     silence_timeout_sec: float = 300.0
+    # The process re-execs itself at this local hour (between two games)
+    # to keep a 24/7 run fresh.  None disables it.
+    daily_restart_hour: int | None = 4
     # How many games may be joined per hour before the bot backs off on
     # its own.  The server bans accounts that join too often.
     joins_per_hour: int = 12

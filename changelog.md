@@ -7,6 +7,20 @@ and the project uses [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- The **room choice prefers the richer rooms**: among the matches only
+  the ones within 80% of the best `regularXp` are considered, and the
+  pick stays random between them.
+- A **nightly self-restart**: at `daily_restart_hour` (default 4 local)
+  the process re-executes itself between two games.  `os.execv` keeps
+  the pid and the lock valid, the service and the watchdog never
+  notice, and the fresh process authenticates from the persisted
+  refresh token.
+- The **daily reward waits for its date**: a rung whose
+  `canBeClaimedDate` has not arrived is left alone instead of being
+  posted again every loop (found with `tools/probe_daily.py`).
+
 Planned work, see `docs/FEATURE-PLAN.md` for the full list.
 
 ## [0.0.3] - 2026-11-04
@@ -66,6 +80,14 @@ like a cautious human and the dashboard shows the value.
 - `tools/deploy.py` replaces the hand-typed adb chain: one command
   packages, pushes, unpacks (run-as), swaps the directory, restarts
   the service and verifies the version on the dashboard.
+
+### Known issues
+
+- The **daily reward ladder** reports an open rung ("TALISMAN") whose
+  claim POST comes back with an empty body and no effect - the rung
+  stays open and the bot retries it every loop.  Under investigation
+  with `tools/probe_daily.py`; until then the log line is the honest
+  "server answered nothing" instead of a fake success.
 
 ## [0.0.2] - 2026-11-04
 
