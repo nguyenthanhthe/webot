@@ -105,8 +105,10 @@ class Bot:
         # Watches the game for a patch that could break the protocol.
         self.updates = UpdateWatcher(cfg, self.http, self.auth.auth_headers())
         self._last_update_check = 0.0
-        # The day the process re-executed itself the last time.
-        self._last_restart_day = ""
+        # The day the process re-executed itself the last time.  It
+        # lives in the state dir: os.execv wipes the memory, and a
+        # marker only in RAM would restart the bot in a tight loop.
+        self._last_restart_day = self._load_restart_day()
 
     # ------------------------------------------------------------------
     def _load_device_id(self) -> str:
@@ -176,15 +178,32 @@ class Bot:
         today = time.strftime("%Y-%m-%d")
         return self._last_restart_day != today
 
+    def _load_restart_day(self) -> str:
+        try:
+            path = state_path("restart_day.txt")
+            if path.is_file():
+                return path.read_text(encoding="utf-8").strip()
+        except OSError:
+            pass
+        return ""
+
+    def _save_restart_day(self, day: str) -> None:
+        try:
+            state_path("restart_day.txt").write_text(day + "\n", encoding="utf-8")
+        except OSError as exc:
+            log.warning("could not record the restart day: %s", exc)
+
     def _reexec(self) -> None:
         """Replace the process with a fresh one, same command line.
 
         ``os.execv`` keeps the pid and the lock file valid, so the
-        service runner and the watchdog never notice.  The durable
-        credential lives on disk, so the fresh process authenticates by
-        itself.
+        service runner and the watchdog never notice.  The restart day
+        is recorded in the state dir BEFORE the exec - the fresh
+        process reads it and does not restart again.
         """
-        self._last_restart_day = time.strftime("%Y-%m-%d")
+        today = time.strftime("%Y-%m-%d")
+        self._save_restart_day(today)
+        self._last_restart_day = today
         self.log_event("bot", "daily restart - replacing the process")
         self.store.update(status="restarting")
         os.execv(sys.executable, [sys.executable, *sys.argv])

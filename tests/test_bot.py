@@ -6,13 +6,16 @@ state directory.  Only the attributes a helper touches are attached.
 
 from __future__ import annotations
 
+import tempfile
 import time
 import types
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest import mock
 
 import wvbot.bot as bot_module
+import wvbot.config as config_module
 from wvbot.bot import KILLER_ROLES, PROTECTOR_ROLES, Bot, _extract_game_info, _parse_ban_until
 from wvbot.dashboard import StatusStore
 
@@ -196,10 +199,10 @@ class PickRoomTest(unittest.TestCase):
 
 
 class NightlyRestartTest(unittest.TestCase):
-    def _bot(self, cfg_hour) -> Bot:
+    def _bot(self, cfg_hour, restart_day="") -> Bot:
         return shell(
             cfg=types.SimpleNamespace(daily_restart_hour=cfg_hour),
-            _last_restart_day="",
+            _last_restart_day=restart_day,
             store=StatusStore(),
         )
 
@@ -220,13 +223,24 @@ class NightlyRestartTest(unittest.TestCase):
         self.assertFalse(self._bot(None)._nightly_restart_due())
 
     def test_only_once_per_day(self) -> None:
-        bot = self._bot(4)
+        bot = self._bot(4, restart_day="2026-11-05")
         with mock.patch.object(bot_module.time, "localtime") as lt:
             lt.return_value = types.SimpleNamespace(tm_hour=4)
             with mock.patch.object(bot_module.time, "strftime", return_value="2026-11-05"):
-                self.assertTrue(bot._nightly_restart_due())
-                bot._last_restart_day = "2026-11-05"
                 self.assertFalse(bot._nightly_restart_due())
+
+    def test_the_marker_survives_an_exec(self) -> None:
+        # os.execv wipes the memory: the day has to live in the state
+        # dir, or the bot restarts in a tight loop (seen live at 4 AM).
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(config_module, "STATE_DIR", Path(tmp)):
+                bot = Bot.__new__(Bot)
+                bot._last_restart_day = bot._load_restart_day()
+                self.assertEqual(bot._last_restart_day, "")
+                bot._save_restart_day("2026-11-05")
+                again = Bot.__new__(Bot)
+                again._last_restart_day = again._load_restart_day()
+                self.assertEqual(again._last_restart_day, "2026-11-05")
 
 
 class MaybeChatTest(unittest.TestCase):
