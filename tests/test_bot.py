@@ -449,6 +449,34 @@ class ReexecGuardTest(unittest.TestCase):
                 self.assertEqual(bot.store.get().get("status"), "running")
 
 
+class JoinBudgetTest(unittest.TestCase):
+    def _bot(self, joins: int, per_hour: int) -> Bot:
+        now = time.time()
+        return shell(
+            cfg=types.SimpleNamespace(joins_per_hour=per_hour),
+            _join_times=[now - 60 * m for m in range(1, joins + 1)],
+            store=StatusStore(),
+        )
+
+    def test_budget_is_open_below_the_cap(self) -> None:
+        bot = self._bot(joins=5, per_hour=12)
+        bot.log_event = lambda *a, **k: None
+        self.assertTrue(bot._join_budget_left())
+
+    def test_budget_is_closed_at_the_cap(self) -> None:
+        bot = self._bot(joins=12, per_hour=12)
+        self.assertFalse(bot._join_budget_left())
+
+    def test_old_joins_do_not_close_the_budget(self) -> None:
+        now = time.time()
+        bot = shell(
+            cfg=types.SimpleNamespace(joins_per_hour=12),
+            _join_times=[now - 7200] * 20,
+            store=StatusStore(),
+        )
+        self.assertTrue(bot._join_budget_left())
+
+
 class ProjectionTest(unittest.TestCase):
     def test_rate_and_hours_to_next_level(self) -> None:
         bot = shell(store=StatusStore())

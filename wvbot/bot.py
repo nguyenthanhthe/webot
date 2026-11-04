@@ -182,6 +182,22 @@ class Bot:
         """
         return random.SystemRandom().random() < self.cfg.room_skip_chance
 
+    def _join_budget_left(self) -> bool:
+        """False when the hourly join cap is used up this round.
+
+        A longer wait after the fact still put join number thirteen
+        inside the hour; the cap has to be checked *before* joining,
+        or the self-protection is decorative.
+        """
+        left = self._joins_in_hour() < self.cfg.joins_per_hour
+        if not left:
+            self.log_event(
+                "lobby",
+                f"{self._joins_in_hour()} joins in the last hour - "
+                "cap reached, waiting this round out",
+            )
+        return left
+
     # ------------------------------------------------------------------
     def _nightly_restart_due(self) -> bool:
         """True once a day at the configured local hour."""
@@ -420,6 +436,12 @@ class Bot:
             return False
         room_id = GameApi._room_id(room)
         room_name = GameApi._room_name(room)
+
+        # The hourly cap is checked before the join: a longer wait
+        # afterwards would still put one join too many in the window.
+        if not self._join_budget_left():
+            self.store.update(status="waiting for room")
+            return False
 
         # A human does not take every room: this round is occasionally
         # left alone entirely.  The skipped room does not count as a
