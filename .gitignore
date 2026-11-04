@@ -1,0 +1,14 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Node
+node_modules/
+*.log
+
+# Build artifacts
+wvbot.zip
+
+# The real credentials never live in the repository
+web/config.json
+web/state/
