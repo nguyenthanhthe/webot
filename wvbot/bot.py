@@ -609,6 +609,7 @@ class Bot:
                 phase=self.state.phase,
                 levels=self._player_levels(),
             )
+            self._update_alive()
             self._maybe_chat(sock)
             self._night_action(sock)
             self._protector_action(sock)
@@ -641,6 +642,8 @@ class Bot:
             self.state.apply(event, payload)
             if event in ("player-joined-and-equipped-items", "players-and-equipped-items"):
                 self.store.update(levels=self._player_levels())
+            if event in ("game-players-killed", "game-reconnect-set-players"):
+                self._update_alive()
         elif event == "game-over-awards-available":
             # The raw payload goes into the log once per game: it is the
             # ground truth a future feature (win counting) needs, and it
@@ -840,6 +843,10 @@ class Bot:
         elif remaining > 0:
             out["hours_to_next_level"] = None
         return out
+
+    def _update_alive(self) -> None:
+        """How many players are still standing, for the dashboard."""
+        self.store.update(alive=len(self.state.alive))
 
     def _player_levels(self) -> list[dict[str, Any]]:
         """The level of every player in the room, for the dashboard."""
