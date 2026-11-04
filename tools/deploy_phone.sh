@@ -67,13 +67,19 @@ if [ -f "$BOT_DIR/payload.js" ]; then
   echo "payload installed"
 fi
 
-# 3. the durable credential
+# 3. the durable credential.  A token the bot rotated is only in the
+# state file - the home copy would be the stale one, so the state file
+# wins once it exists.
 mkdir -p "$STATE"
 chmod 700 "$STATE"
 if [ -f "$HOME_DIR/refresh_token.txt" ]; then
-  cp "$HOME_DIR/refresh_token.txt" "$STATE/refresh_token.txt"
-  chmod 600 "$STATE/refresh_token.txt"
-  echo "refresh token stored"
+  if [ ! -f "$STATE/refresh_token.txt" ]; then
+    cp "$HOME_DIR/refresh_token.txt" "$STATE/refresh_token.txt"
+    chmod 600 "$STATE/refresh_token.txt"
+    echo "refresh token stored"
+  else
+    echo "refresh token already in the state dir - keeping it"
+  fi
   rm -f "$HOME_DIR/refresh_token.txt"
 fi
 
