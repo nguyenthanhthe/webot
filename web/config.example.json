@@ -1,0 +1,15 @@
+{
+  "email": "",
+  "password": "",
+  "room_names": ["vill win"],
+  "language": "en",
+  "game_mode": "custom",
+  "headless": true,
+  "reconnect_delay_sec": 5,
+  "login_timeout_sec": 120,
+  "claim_double_xp": true,
+  "dashboard": {
+    "host": "127.0.0.1",
+    "port": 8787
+  }
+}
