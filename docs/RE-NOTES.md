@@ -163,9 +163,10 @@ in the config turns them back on, `room_password` sends the password).
 
 The `awardedXp` reasons seen live: `GAME_FINISHED` (the base pay) and
 `CONSECUTIVE_GAMES` (a streak bonus for playing back to back within a
-window).  A **win flag has no ground truth yet** - the payload tail
-beyond the log cut is still unseen; the bot logs 1600 characters of
-the payload per game to finish the survey.
+window).  The full payload is ~660 characters and ends at
+`inAppReviewEligible` - **it carries no win flag**, so a "wins"
+counter has no data source in the observed protocol; the dashboard
+does not show one.
 
 ### Client -> server
 
