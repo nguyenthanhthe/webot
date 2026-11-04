@@ -134,7 +134,11 @@ class Bot:
         clean = "".join(c for c in str(language) if c.isalpha())[:8] or "en"
         base = GAME_URL_ASIA if host == "asia" else self.cfg.game_base_url
         url = f"{base}/api/public/game/custom?language={clean}"
-        return self.http.request("GET", url, headers=self.auth.auth_headers())
+        data = self.http.request("GET", url, headers=self.auth.auth_headers())
+        if isinstance(data, dict):
+            games = data.get("openGames") or data.get("games") or []
+            return games if isinstance(games, list) else []
+        return data if isinstance(data, list) else []
 
     def log_event(self, kind: str, message: str, **extra: Any) -> None:
         log.info("%s", message)
