@@ -29,6 +29,7 @@ class StatusStore:
         self._events: deque[dict[str, Any]] = deque(maxlen=max_events)
         self._data: dict[str, Any] = {
             "status": "starting",
+            "version": None,
             "phase": "lobby",
             "room": None,
             "game_id": None,
@@ -154,6 +155,7 @@ async function refresh() {
     : (hours < 48 ? hours + ' h' : (hours / 24).toFixed(1) + ' d');
   const cards = [
     ['status', st.status, st.status === 'running' || st.status === 'playing' ? 'ok' : 'warn'],
+    ['bot', st.version || '-', ''],
     ['account', st.username || '-', ''],
     ['level', st.level === null || st.level === undefined ? '-' : st.level, 'ok'],
     ['account xp', st.account_xp === null || st.account_xp === undefined ? '-' : st.account_xp, 'ok'],

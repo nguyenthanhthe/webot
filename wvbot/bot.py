@@ -27,6 +27,7 @@ import time
 import uuid
 from typing import Any
 
+from . import __version__
 from .api import GameApi
 from .auth import AuthManager
 from .config import Config, state_path
@@ -208,7 +209,8 @@ class Bot:
             control=self._control,
             reward=self._reward,
         )
-        self.log_event("bot", "bot starting")
+        self.log_event("bot", f"bot starting (v{__version__})")
+        self.store.update(version=__version__)
         self.history.record_session()
         self.store.update(history=self.history.get())
         try:
