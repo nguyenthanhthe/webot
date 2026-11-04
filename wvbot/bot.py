@@ -38,10 +38,24 @@ from .sio import SocketIOClient
 log = logging.getLogger("wvbot.bot")
 
 # Roles that act on the player the day vote landed on.
+# The roles that kill somebody and the event they use.  The list comes
+# from the events the official client emits; a role that is missing here
+# simply does not act.
 KILLER_ROLES = {
     "priest": "game-priest-kill-player",
     "vigilante": "game-vigilante-shoot",
     "gunner": "game-gunner-shoot-player",
+    "marksman": "game-marksman-shoot",
+    "witch": "game-witch-kill-player",
+    "warden": "game-warden-kill",
+    "jailer": "game-jailer-kill-player",
+    "serial-killer": "game-serial-killer-vote",
+}
+
+# The roles that protect somebody.
+PROTECTOR_ROLES = {
+    "doctor": "game-doctor-protect-player",
+    "bodyguard": "game-bodyguard-protect-player",
 }
 
 
@@ -333,9 +347,11 @@ class Bot:
                 phase=self.state.phase,
             )
             self._night_action(sock)
+            self._protector_action(sock)
         elif event in ("game-night-started", "game-werewolves-vote-set"):
             self.state.apply(event, payload)
             self._night_action(sock)
+            self._protector_action(sock)
         elif event == "game-day-voting-started":
             self.state.apply(event, payload)
             self._day_vote(sock)
@@ -476,7 +492,8 @@ class Bot:
         self._hesitate()
         try:
             if target is None:
-                sock.emit("game-vote-to-skip", json.dumps({}))
+                # The official client sends this one without a payload.
+                sock.emit("game-vote-to-skip")
                 self.log_event("action", "day vote: skip")
             else:
                 sock.emit("game-day-vote-set", json.dumps({"targetPlayerId": target}))
@@ -492,6 +509,20 @@ class Bot:
         target = None
         for value in data.values():
             target = value
+        if target is None:
+            return
+        try:
+            sock.emit(event, json.dumps({"targetPlayerId": target}))
+            self.log_event("action", f"{event} -> {target}")
+        except Exception as exc:  # noqa: BLE001
+            self.log_event("warn", f"{event} failed: {exc}")
+
+    def _protector_action(self, sock: SocketIOClient) -> None:
+        """The doctor and the bodyguard pick somebody to protect."""
+        event = PROTECTOR_ROLES.get(self.state.role_id.lower())
+        if not event:
+            return
+        target = self.policy.protect_target(self.state)
         if target is None:
             return
         try:
