@@ -7,6 +7,12 @@ and the project uses [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+Planned work, see `docs/FEATURE-PLAN.md` for the full list.
+
+## [0.0.4] - 2026-11-05
+
+The farming is smarter and the 24/7 run survives its own restarts.
+
 ### Added
 
 - The **room choice prefers the richer rooms**: among the matches only
@@ -24,8 +30,44 @@ and the project uses [semantic versioning](https://semver.org/).
   `chat_enabled` on, the bot says one of the lines with a 30% chance
   after a human pause when the game starts.  Off by default.
 - `tools/status.py` prints the **running version** next to the status.
+- `tools/deploy.py` stages the runner, the control script and the
+  phone's own installer, so **one command updates everything** on the
+  device.
 
-Planned work, see `docs/FEATURE-PLAN.md` for the full list.
+### Fixed
+
+- A **dead player** could receive the day vote - the accusation counts
+  did not skip dead players, the vote would have been wasted.
+- The room could make the bot **vote for itself**; the counts leave the
+  bot's own id out now.
+- `reset()` kept the **own player id** of the last game.
+- A `gridIdx` of **0** (the first slot) was read as -1.
+- A **dead game socket** left the session hanging until the silence
+  watchdog (300 s): the reader thread swallowed packet errors and the
+  "disconnect" handler was dead code.  It dispatches now, and a broken
+  packet ends the session the same way.
+- The websocket layer handed every **continuation frame** to the parser
+  as its own message - a game event the server split into several
+  frames became truncated JSON and the bot played blind.  Fragments
+  are joined now; a bogus frame length is refused instead of being
+  allocated.
+- The service runner killed the bot with **SIGKILL on the stop flag** -
+  the bot never got to announce `mg:exit-game`, so every service
+  restart looked like fleeing the village.  SIGTERM first, 12 s of
+  grace, SIGKILL only as the last resort.  `bot_ctl.sh` waits up to
+  20 s for the lock.
+- The installer **overwrote a rotated refresh token** with the stale
+  home copy; the state file wins once it exists.
+- A refused **daily reward claim** was logged as a success; the log
+  carries the server's answer now.
+- The dashboard **phase card** stayed on "started" after the first
+  phase change; it follows the night and the day vote now.
+
+### Known issues
+
+- The **daily reward ladder** reported an open rung whose claim POST
+  came back empty; the claim now waits for its `canBeClaimedDate`,
+  which made the retries stop.
 
 ## [0.0.3] - 2026-11-04
 
