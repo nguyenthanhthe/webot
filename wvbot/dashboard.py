@@ -91,15 +91,31 @@ PAGE = """<!doctype html>
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   td { padding: 4px 8px; border-bottom: 1px solid #262b33; vertical-align: top; }
   td.t { color: #8b949e; width: 80px; }
+  button { background: #1e2127; color: #e6e6e6; border: 1px solid #2b3038;
+           border-radius: 6px; padding: 6px 12px; margin-right: 8px;
+           font-family: inherit; cursor: pointer; }
+  button:hover { border-color: #7dd3fc; color: #7dd3fc; }
 </style>
 </head>
 <body>
 <h1>Wolvesville bot - v0.0.1</h1>
 <div class="grid" id="cards"></div>
+<h1 style="color:#c9d1d9">Controls</h1>
+<p><button onclick="ctl('pause')">Pause</button>
+   <button onclick="ctl('resume')">Resume</button>
+   <button onclick="ctl('restart')">Restart game</button></p>
 <h1 style="color:#c9d1d9">Recent events</h1>
 <table id="events"></table>
 <script>
 const fmt = s => new Date(s * 1000).toLocaleTimeString();
+async function ctl(action) {
+  await fetch('/api/control', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({kind: 'control', action}),
+  });
+  refresh();
+}
 async function refresh() {
   const st = await (await fetch('/api/status')).json();
   const rate = st.uptime_sec > 60 ? Math.round(st.xp_total / (st.uptime_sec / 3600)) : 0;
@@ -136,6 +152,8 @@ refresh();
 
 class _Handler(BaseHTTPRequestHandler):
     store: StatusStore = None  # type: ignore[assignment]
+    # Called with the requested action; returns True when it was handled.
+    control: Any = None  # type: ignore[assignment]
 
     def log_message(self, fmt: str, *args: Any) -> None:  # silence access log
         log.debug("dashboard %s", fmt % args)
@@ -178,6 +196,14 @@ class _Handler(BaseHTTPRequestHandler):
                 self.store.add_event(
                     str(payload.get("level") or "info"), message
                 )
+        elif kind == "control":
+            action = str(payload.get("action") or "")
+            handled = False
+            if self.control is not None:
+                handled = bool(self.control(action))
+            body = json.dumps({"ok": handled}).encode()
+            self._send(200, body, "application/json")
+            return
         self._send(200, b'{"ok":true}', "application/json")
 
     def do_GET(self) -> None:  # noqa: N802 - required by BaseHTTPRequestHandler
@@ -202,8 +228,13 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(404, b'{"error":"not found"}', "application/json")
 
 
-def start_dashboard(store: StatusStore, host: str = "0.0.0.0", port: int = 8787):
-    handler = type("_BoundHandler", (_Handler,), {"store": store})
+def start_dashboard(
+    store: StatusStore,
+    host: str = "0.0.0.0",
+    port: int = 8787,
+    control: Any = None,
+):
+    handler = type("_BoundHandler", (_Handler,), {"store": store, "control": control})
     server = ThreadingHTTPServer((host, port), handler)
     thread = threading.Thread(target=server.serve_forever, name="dashboard", daemon=True)
     thread.start()

@@ -69,6 +69,9 @@ class Bot:
         self._join_times: list[float] = []
         # The player id of the logged-in account, learned from the profile.
         self._own_player_id: Any = None
+        # Set by the dashboard: pause the bot, or restart the session.
+        self._paused = threading.Event()
+        self._restart = threading.Event()
 
     # ------------------------------------------------------------------
     def _load_device_id(self) -> str:
@@ -121,8 +124,35 @@ class Bot:
         self._joins_in_hour()
 
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # remote control
+    # ------------------------------------------------------------------
+    def _control(self, action: str) -> bool:
+        """Handle a control action from the dashboard."""
+        action = action.strip().lower()
+        if action == "pause":
+            self._paused.set()
+            self.log_event("bot", "paused from the dashboard")
+            self.store.update(status="paused")
+            return True
+        if action == "resume":
+            self._paused.clear()
+            self.log_event("bot", "resumed from the dashboard")
+            self.store.update(status="running")
+            return True
+        if action == "restart":
+            self.log_event("bot", "restart requested from the dashboard")
+            self._restart.set()
+            return True
+        return False
+
     def run(self) -> None:
-        start_dashboard(self.store, self.cfg.dashboard_host, self.cfg.dashboard_port)
+        start_dashboard(
+            self.store,
+            self.cfg.dashboard_host,
+            self.cfg.dashboard_port,
+            control=self._control,
+        )
         self.log_event("bot", "bot starting")
         try:
             self.auth.ensure_token()
@@ -145,6 +175,13 @@ class Bot:
                     break
                 self._banned_until = 0.0
             self._banned.clear()
+
+            # A pause from the dashboard stops everything but keeps the
+            # bot alive and reachable.
+            if self._paused.is_set():
+                self.store.update(status="paused")
+                self.stop_event.wait(2.0)
+                continue
 
             try:
                 played = self.session()
@@ -246,6 +283,10 @@ class Bot:
         # only make the ban longer.
         while not finished.wait(timeout=1.0):
             if self._banned.is_set():
+                break
+            if self._restart.is_set():
+                self._restart.clear()
+                self.log_event("bot", "restarting the game on request")
                 break
             # A socket that stays open but says nothing is a hang: the
             # game is over on the server and we would sit here for hours.
