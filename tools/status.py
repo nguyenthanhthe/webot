@@ -95,7 +95,11 @@ def main() -> int:
         print(f"=== last {min(args.count, len(events))} events ===")
         for event in events[-args.count :]:
             stamp_value = event.get("t") or event.get("ts") or 0
-            stamp = time.strftime("%H:%M:%S", time.localtime(stamp_value / 1000))
+            # The store keeps time.time() (seconds); a millisecond value
+            # from an older store is shrunk instead of shown as 1970.
+            if stamp_value > 1e12:
+                stamp_value /= 1000
+            stamp = time.strftime("%H:%M:%S", time.localtime(stamp_value))
             print(f"  {stamp} [{event['kind']}] {event['message']}")
     return 0
 
