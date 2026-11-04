@@ -386,11 +386,15 @@ class Bot:
         # Stop as soon as the server bans us: touching it again would
         # only make the ban longer.
         while not finished.wait(timeout=1.0):
-            if self._banned.is_set():
-                break
-            if self._restart.is_set():
+            # A stop or restart request from outside ends the game here,
+            # so the leave below is still announced.  A socket that
+            # simply disappears counts as fleeing the village and the
+            # account gets banned for it.
+            if self.stop_event.is_set() or self._restart.is_set():
                 self._restart.clear()
-                self.log_event("bot", "restarting the game on request")
+                self.log_event("bot", "stop or restart request - leaving the room properly")
+                break
+            if self._banned.is_set():
                 break
             if self._session_over.is_set():
                 break
@@ -459,6 +463,7 @@ class Bot:
             self._protector_action(sock)
         elif event in ("game-night-started", "game-werewolves-vote-set"):
             self.state.apply(event, payload)
+            self.store.update(phase=self.state.phase)
             # A new night clears the actions of the last one.
             if event == "game-night-started":
                 self._clear_actions()
@@ -466,6 +471,7 @@ class Bot:
             self._protector_action(sock)
         elif event == "game-day-voting-started":
             self.state.apply(event, payload)
+            self.store.update(phase=self.state.phase)
             self._clear_actions()
             self._day_vote(sock)
         elif event == "game-day-vote-set":
@@ -566,11 +572,14 @@ class Bot:
         kind = str(open_ones[0].get("type") or "reward")
         amount = open_ones[0].get("amount")
         try:
-            rewards.claim_daily_reward()
+            result = rewards.claim_daily_reward()
         except Exception as exc:  # noqa: BLE001
             self.log_event("warn", f"the daily reward failed: {exc}")
             return
-        self.log_event("reward", f"claimed the daily reward: {kind} x{amount}")
+        # The answer decides what gets logged: a claim the server
+        # refused must not read as a success.
+        detail = json.dumps(result)[:200] if result else "server answered nothing"
+        self.log_event("reward", f"daily reward {kind} x{amount} -> {detail}")
 
     def _spin_wheel(self, rewards: Rewards) -> None:
         conditions = rewards.golden_wheel_conditions()
