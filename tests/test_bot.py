@@ -425,6 +425,30 @@ class QueuedActionTest(unittest.TestCase):
         self.assertIn("warn", kinds)
 
 
+class HeartbeatTest(unittest.TestCase):
+    def test_the_heartbeat_is_written_to_the_state_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(config_module, "STATE_DIR", Path(tmp)):
+                bot = shell(store=StatusStore())
+                bot._touch_heartbeat()
+                value = (Path(tmp) / "heartbeat.txt").read_text(encoding="utf-8")
+                self.assertGreater(float(value), 0.0)
+
+
+class ReexecGuardTest(unittest.TestCase):
+    def test_a_failing_exec_does_not_kill_the_bot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(config_module, "STATE_DIR", Path(tmp)):
+                bot = shell(store=StatusStore(), log_event=lambda *a, **k: None)
+                with mock.patch.object(
+                    bot_module.os, "execv", side_effect=OSError("no interpreter")
+                ):
+                    # Before the fix this raised out of the run loop and
+                    # took the whole farm down.
+                    bot._reexec()
+                self.assertEqual(bot.store.get().get("status"), "running")
+
+
 class ProjectionTest(unittest.TestCase):
     def test_rate_and_hours_to_next_level(self) -> None:
         bot = shell(store=StatusStore())

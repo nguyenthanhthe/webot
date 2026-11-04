@@ -193,6 +193,18 @@ class Bot:
         today = time.strftime("%Y-%m-%d")
         return self._last_restart_day != today
 
+    def _touch_heartbeat(self) -> None:
+        """Prove the loop is alive, for the outside watchdog.
+
+        The JobScheduler watchdog can only see the lock directory; a
+        bot that hangs while holding it would sit there forever.  The
+        heartbeat file is the difference between hung and paused.
+        """
+        try:
+            state_path("heartbeat.txt").write_text(f"{time.time()}\n", encoding="utf-8")
+        except OSError as exc:
+            log.warning("could not write the heartbeat: %s", exc)
+
     def _load_restart_day(self) -> str:
         try:
             path = state_path("restart_day.txt")
@@ -214,14 +226,20 @@ class Bot:
         ``os.execv`` keeps the pid and the lock file valid, so the
         service runner and the watchdog never notice.  The restart day
         is recorded in the state dir BEFORE the exec - the fresh
-        process reads it and does not restart again.
+        process reads it and does not restart again.  If the exec
+        itself fails, the bot carries on: dying here would take the
+        farm down until the watchdog notices.
         """
         today = time.strftime("%Y-%m-%d")
         self._save_restart_day(today)
         self._last_restart_day = today
         self.log_event("bot", "daily restart - replacing the process")
         self.store.update(status="restarting")
-        os.execv(sys.executable, [sys.executable, *sys.argv])
+        try:
+            os.execv(sys.executable, [sys.executable, *sys.argv])
+        except OSError as exc:
+            self.log_event("warn", f"the daily restart failed, carrying on: {exc}")
+            self.store.update(status="running")
 
     def _pick_room(self, rooms: list[dict[str, Any]]) -> dict[str, Any] | None:
         """Choose a room, preferring the ones that pay the most XP.
@@ -311,6 +329,9 @@ class Bot:
             self.log_event("error", f"initial auth failed: {exc}")
 
         while not self.stop_event.is_set():
+            # The outside watchdog reads this file to tell a hung bot
+            # from a working one.
+            self._touch_heartbeat()
             # The profile is read from time to time, also while the bot
             # waits for a room: the account can be renamed and a new
             # ban can appear at any moment.
