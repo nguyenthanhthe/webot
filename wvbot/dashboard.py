@@ -46,6 +46,14 @@ class StatusStore:
             "level": None,
             "account_xp": None,
             "games_finished": None,
+            # The XP that is still missing for the next level.
+            "xp_until_next": None,
+            # The XP rate and the time to the next level.
+            "projection": {},
+            # The XP of today and of all time, kept across restarts.
+            "history": {},
+            # The level of every player in the room.
+            "levels": [],
             "started_at": time.time(),
             "updated_at": time.time(),
         }
@@ -95,15 +103,22 @@ PAGE = """<!doctype html>
            border-radius: 6px; padding: 6px 12px; margin-right: 8px;
            font-family: inherit; cursor: pointer; }
   button:hover { border-color: #7dd3fc; color: #7dd3fc; }
+  .levels { margin-top: 8px; }
+  .levels td.me { color: #4ade80; font-weight: bold; }
+  .levels td.dead { color: #6e7681; text-decoration: line-through; }
 </style>
 </head>
 <body>
-<h1>Wolvesville bot - v0.0.1</h1>
+<h1>Wolvesville bot - v0.0.2</h1>
 <div class="grid" id="cards"></div>
 <h1 style="color:#c9d1d9">Controls</h1>
 <p><button onclick="ctl('pause')">Pause</button>
    <button onclick="ctl('resume')">Resume</button>
-   <button onclick="ctl('restart')">Restart game</button></p>
+   <button onclick="ctl('restart')">Restart game</button>
+   <button onclick="reward('daily')">Claim daily reward</button>
+   <button onclick="reward('wheel')">Spin the golden wheel</button></p>
+<h1 style="color:#c9d1d9">Players in the room</h1>
+<table class="levels" id="levels"></table>
 <h1 style="color:#c9d1d9">Recent events</h1>
 <table id="events"></table>
 <script>
@@ -116,14 +131,35 @@ async function ctl(action) {
   });
   refresh();
 }
+async function reward(action) {
+  const res = await fetch('/api/control', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({kind: 'reward', action}),
+  });
+  const body = await res.json();
+  if (!body.ok) alert('the request was refused - look at the log');
+  refresh();
+}
 async function refresh() {
   const st = await (await fetch('/api/status')).json();
   const rate = st.uptime_sec > 60 ? Math.round(st.xp_total / (st.uptime_sec / 3600)) : 0;
+  const proj = st.projection || {};
+  const hist = st.history || {};
+  const hours = proj.hours_to_next_level;
+  const eta = hours === null || hours === undefined ? '-'
+    : (hours < 48 ? hours + ' h' : (hours / 24).toFixed(1) + ' d');
   const cards = [
     ['status', st.status, st.status === 'running' || st.status === 'playing' ? 'ok' : 'warn'],
     ['account', st.username || '-', ''],
     ['level', st.level === null || st.level === undefined ? '-' : st.level, 'ok'],
     ['account xp', st.account_xp === null || st.account_xp === undefined ? '-' : st.account_xp, 'ok'],
+    ['xp today', hist.today_xp || 0, 'ok'],
+    ['xp all time', hist.total_xp || 0, 'ok'],
+    ['games all time', hist.total_games || 0, ''],
+    ['xp to next level', st.xp_until_next === null || st.xp_until_next === undefined
+      ? '-' : st.xp_until_next, ''],
+    ['next level in', eta, ''],
     ['phase', st.phase || '-', ''],
     ['room', st.room || '-', ''],
     ['role', st.role || '-', ''],
@@ -139,6 +175,17 @@ async function refresh() {
   ];
   document.getElementById('cards').innerHTML = cards.map(([k, v, c]) =>
     `<div class="card"><div class="k">${k}</div><div class="v ${c}">${v}</div></div>`).join('');
+
+  const rows = st.levels || [];
+  document.getElementById('levels').innerHTML = rows.length
+    ? rows.map(p => {
+        const cls = p.own ? 'me' : (p.alive ? '' : 'dead');
+        const mark = p.own ? ' (you)' : '';
+        return `<tr><td class="${cls}">${p.name || '?'}${mark}</td>` +
+               `<td class="${cls}">lvl ${p.level}</td></tr>`;
+      }).join('')
+    : '<tr><td>no player data yet</td></tr>';
+
   const ev = await (await fetch('/api/events?limit=60')).json();
   document.getElementById('events').innerHTML = ev.map(e =>
     `<tr><td class="t">${fmt(e.ts)}</td><td>${e.kind}</td><td>${e.message}</td></tr>`).join('');
@@ -154,6 +201,8 @@ class _Handler(BaseHTTPRequestHandler):
     store: StatusStore = None  # type: ignore[assignment]
     # Called with the requested action; returns True when it was handled.
     control: Any = None  # type: ignore[assignment]
+    # Called with the requested reward action.
+    reward: Any = None  # type: ignore[assignment]
 
     def log_message(self, fmt: str, *args: Any) -> None:  # silence access log
         log.debug("dashboard %s", fmt % args)
@@ -204,6 +253,16 @@ class _Handler(BaseHTTPRequestHandler):
             body = json.dumps({"ok": handled}).encode()
             self._send(200, body, "application/json")
             return
+        elif kind == "reward":
+            # A reward that has to be picked up right now: the daily
+            # reward or a spin of the golden wheel.
+            action = str(payload.get("action") or "")
+            handled = False
+            if self.reward is not None:
+                handled = bool(self.reward(action))
+            body = json.dumps({"ok": handled}).encode()
+            self._send(200, body, "application/json")
+            return
         self._send(200, b'{"ok":true}', "application/json")
 
     def do_GET(self) -> None:  # noqa: N802 - required by BaseHTTPRequestHandler
@@ -233,8 +292,13 @@ def start_dashboard(
     host: str = "0.0.0.0",
     port: int = 8787,
     control: Any = None,
+    reward: Any = None,
 ):
-    handler = type("_BoundHandler", (_Handler,), {"store": store, "control": control})
+    handler = type(
+        "_BoundHandler",
+        (_Handler,),
+        {"store": store, "control": control, "reward": reward},
+    )
     server = ThreadingHTTPServer((host, port), handler)
     thread = threading.Thread(target=server.serve_forever, name="dashboard", daemon=True)
     thread.start()

@@ -27,8 +27,10 @@ MEMBERS = [
     (ROOT / "wvbot" / "firefox.py", "wvbot/firefox.py"),
     (ROOT / "wvbot" / "game.py", "wvbot/game.py"),
     (ROOT / "wvbot" / "http_client.py", "wvbot/http_client.py"),
+    (ROOT / "wvbot" / "history.py", "wvbot/history.py"),
     (ROOT / "wvbot" / "marionette.py", "wvbot/marionette.py"),
     (ROOT / "wvbot" / "netfix.py", "wvbot/netfix.py"),
+    (ROOT / "wvbot" / "rewards.py", "wvbot/rewards.py"),
     (ROOT / "wvbot" / "sio.py", "wvbot/sio.py"),
     (ROOT / "wvbot" / "ws.py", "wvbot/ws.py"),
     (ROOT / "wvbot" / "webbot.py", "wvbot/webbot.py"),
@@ -41,6 +43,7 @@ MEMBERS = [
     (ROOT / "tools" / "check_hosts.py", "check_hosts.py"),
     (ROOT / "tools" / "show_lines.py", "show_lines.py"),
     (ROOT / "tools" / "probe_own_id.py", "probe_own_id.py"),
+    (ROOT / "tools" / "probe_rewards.py", "probe_rewards.py"),
     # The payload is shared with the Node/Playwright runner and lives at the
     # root of the package on the phone.
     (ROOT / "web" / "payload.js", "payload.js"),

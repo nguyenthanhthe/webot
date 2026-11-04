@@ -31,8 +31,10 @@ from .api import GameApi
 from .auth import AuthManager
 from .config import Config, state_path
 from .dashboard import StatusStore, start_dashboard
-from .game import GameState, Policy, parse_payload
+from .game import GameState, Policy, parse_payload, xp_to_next_level
+from .history import XpHistory
 from .http_client import HttpClient
+from .rewards import Rewards
 from .sio import SocketIOClient
 
 log = logging.getLogger("wvbot.bot")
@@ -91,6 +93,8 @@ class Bot:
         # The actions already taken in the current phase, so the bot
         # acts once and not on every repeated server event.
         self._acted_keys: set[str] = set()
+        # The XP counters survive a restart.
+        self.history = XpHistory(state_path(cfg.state_file.replace(".json", "_history.json")))
 
     # ------------------------------------------------------------------
     def _load_device_id(self) -> str:
@@ -165,14 +169,33 @@ class Bot:
             return True
         return False
 
+    def _reward(self, action: str) -> bool:
+        """Handle a reward action from the dashboard."""
+        action = action.strip().lower()
+        if action not in ("daily", "wheel"):
+            return False
+        try:
+            rewards = Rewards(self.cfg, self.http, self.auth.auth_headers())
+            if action == "daily":
+                self._claim_daily(rewards)
+            else:
+                self._spin_wheel(rewards)
+        except Exception as exc:  # noqa: BLE001
+            self.log_event("warn", f"the reward request failed: {exc}")
+            return False
+        return True
+
     def run(self) -> None:
         start_dashboard(
             self.store,
             self.cfg.dashboard_host,
             self.cfg.dashboard_port,
             control=self._control,
+            reward=self._reward,
         )
         self.log_event("bot", "bot starting")
+        self.history.record_session()
+        self.store.update(history=self.history.get())
         try:
             self.auth.ensure_token()
             self.api.auth_headers = self.auth.auth_headers()
@@ -211,6 +234,9 @@ class Bot:
                 delay = self._next_delay()
                 self.log_event("lobby", f"next game in {int(delay)}s")
                 self.stop_event.wait(delay)
+                # The rewards are picked up between two games, when the
+                # bot is not holding a room.
+                self._collect_rewards()
                 if not played:
                     continue
             except Exception as exc:  # noqa: BLE001 - the supervisor must not die
@@ -363,7 +389,13 @@ class Bot:
                 xp_last=xp,
                 games_played=int(stats.get("games_played") or 0) + 1,
             )
+            # The account XP changed on the server, so the level and the
+            # projection have to be read again.
+            self._read_profile()
             self.log_event("xp", f"+{xp} xp" + (f" (+{levels} levels)" if levels else ""))
+            # The counters survive a restart.
+            self.history.record_game(xp)
+            self.store.update(history=self.history.get())
             if self.cfg.claim_double_xp and award.get("canClaimDoubleXp"):
                 self._claim_double_xp(sock)
 
@@ -389,6 +421,7 @@ class Bot:
                 role=self.state.role_name or self.state.role_id,
                 players=len(self.state.players),
                 phase=self.state.phase,
+                levels=self._player_levels(),
             )
             self._night_action(sock)
             self._protector_action(sock)
@@ -413,8 +446,12 @@ class Bot:
             "game-cupid-lover-ids-and-roles",
             "game-reconnect-set-players",
             "game:chat-public:msg",
+            "player-joined-and-equipped-items",
+            "players-and-equipped-items",
         ):
             self.state.apply(event, payload)
+            if event in ("player-joined-and-equipped-items", "players-and-equipped-items"):
+                self.store.update(levels=self._player_levels())
         elif event == "game-over-awards-available":
             self.state.apply(event, payload)
             self.store.update(phase="game-over")
@@ -449,6 +486,101 @@ class Bot:
             self._session_over.set()
 
     # -- actions -------------------------------------------------------
+    def _collect_rewards(self) -> None:
+        """Pick up the rewards between two games.
+
+        The daily reward is free, so it is claimed.  The golden wheel
+        costs roses and only spins when the config says so.
+        """
+        if not self.cfg.claim_daily_rewards and not self.cfg.spin_golden_wheel:
+            return
+        try:
+            rewards = Rewards(self.cfg, self.http, self.auth.auth_headers())
+            if self.cfg.claim_daily_rewards:
+                self._claim_daily(rewards)
+            if self.cfg.spin_golden_wheel:
+                self._spin_wheel(rewards)
+        except Exception as exc:  # noqa: BLE001 - a reward must not stop the bot
+            self.log_event("warn", f"the rewards failed: {exc}")
+
+    def _claim_daily(self, rewards: Rewards) -> None:
+        ladder = rewards.daily_rewards()
+        if not ladder:
+            return
+        open_ones = [r for r in ladder if not r.get("claimed")]
+        if not open_ones:
+            return
+        kind = str(open_ones[0].get("type") or "reward")
+        amount = open_ones[0].get("amount")
+        try:
+            rewards.claim_daily_reward()
+        except Exception as exc:  # noqa: BLE001
+            self.log_event("warn", f"the daily reward failed: {exc}")
+            return
+        self.log_event("reward", f"claimed the daily reward: {kind} x{amount}")
+
+    def _spin_wheel(self, rewards: Rewards) -> None:
+        conditions = rewards.golden_wheel_conditions()
+        cost = int(conditions.get("costInRoses") or 0)
+        if cost > self.cfg.wheel_max_roses:
+            self.log_event(
+                "reward",
+                f"the wheel costs {cost} roses - over the limit, not spinning",
+            )
+            return
+        state = rewards.golden_wheel_state()
+        if not state.get("wheelSupported"):
+            return
+        try:
+            won = rewards.spin_golden_wheel()
+        except Exception as exc:  # noqa: BLE001
+            self.log_event("warn", f"the wheel did not spin: {exc}")
+            return
+        if won:
+            self.log_event("reward", f"the wheel gave: {json.dumps(won)[:200]}")
+
+    def _projection(self) -> dict[str, Any]:
+        """How fast the account levels up.
+
+        The XP rate comes from the session so far, the time to the next
+        level from the XP the server says is missing.
+        """
+        stats = self.store.get()
+        uptime = max(1.0, float(stats.get("uptime_sec") or 1))
+        farmed = int(stats.get("xp_total") or 0)
+        rate = farmed / (uptime / 3600.0)
+
+        level = stats.get("level")
+        remaining = stats.get("xp_until_next")
+        if remaining is None:
+            remaining = xp_to_next_level(int(level or 1))
+        try:
+            remaining = int(remaining)
+        except (TypeError, ValueError):
+            remaining = 0
+
+        out: dict[str, Any] = {"xp_per_hour": round(rate)}
+        if remaining > 0 and rate > 0:
+            out["hours_to_next_level"] = round(remaining / rate, 1)
+        elif remaining > 0:
+            out["hours_to_next_level"] = None
+        return out
+
+    def _player_levels(self) -> list[dict[str, Any]]:
+        """The level of every player in the room, for the dashboard."""
+        rows: list[dict[str, Any]] = []
+        for player in self.state.players:
+            rows.append(
+                {
+                    "name": player.username,
+                    "level": player.level,
+                    "alive": player.is_alive and player.id not in self.state.dead_ids,
+                    "own": player.id == self.state.own_id(),
+                }
+            )
+        rows.sort(key=lambda row: -int(row.get("level") or 0))
+        return rows
+
     def _find_own_id(self) -> None:
         """Work out which player in the list is the bot.
 
@@ -498,6 +630,8 @@ class Bot:
             level=profile.get("level"),
             account_xp=profile.get("xpTotal"),
             games_finished=profile.get("finishedGamesCount"),
+            xp_until_next=profile.get("xpUntilNextLevel"),
+            projection=self._projection(),
         )
         banned_until = _parse_ban_until(str(profile.get("bannedUntilTime") or ""))
         if banned_until > time.time():

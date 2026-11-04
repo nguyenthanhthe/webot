@@ -111,6 +111,14 @@ class Config:
     request_timeout_sec: float = 20.0
     max_retries: int = 3
 
+    # --- rewards -------------------------------------------------------
+    # The daily reward is free, so it is claimed by default.  The
+    # golden wheel costs roses, so it stays off until asked for.
+    claim_daily_rewards: bool = True
+    spin_golden_wheel: bool = False
+    # How many roses the wheel may cost before the bot refuses to spin.
+    wheel_max_roses: int = 100
+
     # --- dashboard -----------------------------------------------------
     dashboard_host: str = "0.0.0.0"
     dashboard_port: int = 8787

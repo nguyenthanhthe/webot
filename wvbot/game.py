@@ -29,6 +29,39 @@ log = logging.getLogger("wvbot.game")
 
 WOLF_TEAMS = {"WEREWOLF", "WOLF", "EVIL", "WEREWOLVES"}
 
+# The XP each level needs, from the official client bundle.  The table
+# is a list of per-level requirements; the cumulative thresholds are
+# its prefix sums.  The server reports "xpUntilNextLevel" anyway, so
+# this is only used to project how long the next level takes.
+LEVEL_XP = [
+    200, 350, 500, 650, 750, 850, 950, 1050, 1150, 1250,
+    1350, 1450, 1500, 1550, 1600, 1650, 1700, 1750, 1800, 1850,
+    1900, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000,
+]
+
+# The cumulative XP needed to reach a level.  Index 0 is level 1.
+LEVEL_XP_TOTAL = [0]
+for _need in LEVEL_XP:
+    LEVEL_XP_TOTAL.append(LEVEL_XP_TOTAL[-1] + _need)
+
+
+def xp_to_next_level(level: int) -> int:
+    """The XP that separates the current level from the next one."""
+    if level < 1:
+        level = 1
+    if level >= len(LEVEL_XP):
+        return LEVEL_XP[-1]
+    return LEVEL_XP[level - 1]
+
+
+def xp_total_for_level(level: int) -> int:
+    """The cumulative XP needed to reach a level."""
+    if level < 1:
+        level = 1
+    if level > len(LEVEL_XP_TOTAL):
+        level = len(LEVEL_XP_TOTAL)
+    return LEVEL_XP_TOTAL[level - 1]
+
 
 def parse_payload(raw: Any) -> Any:
     """The server sends JSON-encoded strings; unwrap up to two levels."""
@@ -52,6 +85,7 @@ class Player:
     is_alive: bool = True
     role: str = ""
     team: str = ""
+    level: int = 0
 
     @classmethod
     def from_object(cls, raw: Any) -> "Player | None":
@@ -67,6 +101,10 @@ class Player:
         else:
             role_id = role or ""
             team = raw.get("team") or ""
+        try:
+            level = int(raw.get("level") or 0)
+        except (TypeError, ValueError):
+            level = 0
         return cls(
             id=pid,
             username=str(raw.get("username") or raw.get("name") or ""),
@@ -74,6 +112,7 @@ class Player:
             is_alive=bool(raw.get("isAlive", True)),
             role=str(role_id),
             team=str(team),
+            level=level,
         )
 
 
@@ -163,6 +202,51 @@ class GameState:
                 del self.messages[:-200]
         elif event == "game-reconnect-set-players":
             self._on_reconnect(data)
+        elif event in (
+            "player-joined-and-equipped-items",
+            "players-and-equipped-items",
+        ):
+            self._on_equipped_items(data)
+
+    def _on_equipped_items(self, data: Any) -> None:
+        """The lobby tells us the level of every player.
+
+        The game start event does not carry the levels, but the lobby
+        events do, so the bot learns the level of everybody in the room
+        before the game begins.
+        """
+        if not isinstance(data, dict):
+            return
+        raw_players = data.get("players")
+        if not isinstance(raw_players, list):
+            single = data.get("player")
+            raw_players = [single] if isinstance(single, dict) else []
+        for raw in raw_players:
+            if not isinstance(raw, dict):
+                continue
+            pid = raw.get("id") or raw.get("playerId") or raw.get("_id")
+            if pid is None:
+                continue
+            player = self.by_id(pid)
+            if player is None:
+                # The player is not in the game list yet: remember the
+                # name and the level anyway.
+                player = Player(id=pid)
+                self.players.append(player)
+            try:
+                level = int(raw.get("level") or 0)
+            except (TypeError, ValueError):
+                level = 0
+            if level:
+                player.level = level
+            username = str(raw.get("username") or raw.get("name") or "")
+            if username:
+                player.username = username
+            if raw.get("gridIdx") is not None:
+                try:
+                    player.grid_idx = int(raw["gridIdx"])
+                except (TypeError, ValueError):
+                    pass
 
     def _on_started(self, data: Any) -> None:
         if not isinstance(data, dict):
