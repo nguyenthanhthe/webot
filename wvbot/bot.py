@@ -564,7 +564,7 @@ class Bot:
             try:
                 self.log_event(
                     "game",
-                    "game-over payload: " + json.dumps(parse_payload(payload))[:400],
+                    "game-over payload: " + json.dumps(parse_payload(payload))[:900],
                 )
             except Exception:  # noqa: BLE001 - logging must not break play
                 pass
