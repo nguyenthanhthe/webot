@@ -134,11 +134,23 @@ value:
 
 * **The test suite grows with the bot** - every protocol fix lands with
   a test first (the suite lives in `tests/`, stdlib only).
+* **Rejoin the same room after a network blip** - today an unexpected
+  disconnect ends the session and the bot hunts a new room; the game
+  it left behind may still pay its award.  Whether the server puts a
+  rejoining player back into the running game needs a **live probe**
+  (`tools/probe_join.py` is the scaffold) - and a probe costs joins,
+  so it runs in an idle window, not mid-day.
+* **A kill drill for the hang watchdog** - write a stale heartbeat by
+  hand, run `sh ~/service/watchdog.sh` and watch it restart a hung
+  bot.  The drill ends a game ungracefully (SIGKILL), so it also runs
+  only while the bot waits for a room.
 * **A second config profile** for a second account (the dual-instance
-  idea without the second session in the same room).
+  idea without the second session in the same room).  Needs the
+  operator: a second manual browser login produces the token.
 * **Chat behaviour** - the payload and the event exist, the bot stays
   silent on purpose for now; if it ever chats, the messages need the
-  same randomised pacing as the votes.
+  same randomised pacing as the votes (the queue already keeps the
+  pause off the reader thread).
 
 ## What we deliberately do not copy
 
