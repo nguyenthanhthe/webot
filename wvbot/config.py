@@ -95,6 +95,9 @@ class Config:
     delay_max_sec: float = 150.0
     # Seconds of "play then leave" before recycling into a fresh room.
     idle_restart_sec: float = 900.0
+    # A game that sends no event for this long is treated as hung and
+    # restarted.  A normal game sends a chat or vote event every minute.
+    silence_timeout_sec: float = 300.0
     # How many games may be joined per hour before the bot backs off on
     # its own.  The server bans accounts that join too often.
     joins_per_hour: int = 12

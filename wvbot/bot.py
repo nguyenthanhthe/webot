@@ -225,8 +225,10 @@ class Bot:
         )
 
         finished = threading.Event()
+        last_event = [time.time()]
 
         def handle(event: str, *args: Any) -> None:
+            last_event[0] = time.time()
             self._on_game_event(sock, event, args)
 
         sock.on_any(handle)
@@ -244,6 +246,11 @@ class Bot:
         # only make the ban longer.
         while not finished.wait(timeout=1.0):
             if self._banned.is_set():
+                break
+            # A socket that stays open but says nothing is a hang: the
+            # game is over on the server and we would sit here for hours.
+            if time.time() - last_event[0] > self.cfg.silence_timeout_sec:
+                self.log_event("warn", "no server event for a long time - restarting the game")
                 break
         sock.close()
 
@@ -326,6 +333,12 @@ class Bot:
             self._banned.set()
         elif event in ("game-player-left", "game-over-player-left"):
             self.log_event("game", f"{event}")
+        elif event.startswith("error-"):
+            # The server refused something: the game was closed, we were
+            # kicked, or the room vanished.  Either way the session is
+            # over and a new room has to be found.
+            self.log_event("warn", f"server error: {event} {str(payload)[:120]}")
+            self.store.update(last_error=event)
 
     # -- actions -------------------------------------------------------
     def _find_own_id(self) -> None:
