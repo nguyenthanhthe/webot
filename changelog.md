@@ -76,6 +76,18 @@ like a cautious human and the dashboard shows the value.
   watchdog (300 s): the reader thread swallowed packet errors and the
   "disconnect" handler was dead code.  It dispatches now, and a broken
   packet ends the session the same way.
+- The websocket layer handed every **continuation frame** to the parser
+  as its own message - a game event the server split into several
+  frames became truncated JSON and the bot played blind.  Fragments
+  are joined now; a bogus frame length is refused instead of being
+  allocated.
+- The service runner killed the bot with **SIGKILL on the stop flag** -
+  the bot never got to announce `mg:exit-game`, so every service
+  restart looked like fleeing the village.  SIGTERM first, 12 s of
+  grace, SIGKILL only as the last resort.  `bot_ctl.sh` waits up to
+  20 s for the lock.
+- The installer **overwrote a rotated refresh token** with the stale
+  home copy; the state file wins once it exists.
 - The dashboard **phase card** stayed on "started" after the first
   phase change; it follows the night and the day vote now.
 

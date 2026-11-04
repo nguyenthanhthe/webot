@@ -74,6 +74,15 @@ bot_pid=$!
 while kill -0 "$bot_pid" 2>/dev/null; do
   if [ -f "$STOPFLAG" ]; then
     echo "--- stop flag found, stopping the bot ---" >> "$LOG"
+    # SIGTERM first: the bot catches it, announces mg:exit-game and
+    # exits by itself.  A hard kill here would look like fleeing the
+    # village and the account gets banned for it.
+    kill -TERM "$bot_pid" 2>/dev/null || true
+    grace=0
+    while [ "$grace" -lt 12 ] && kill -0 "$bot_pid" 2>/dev/null; do
+      sleep 1
+      grace=$((grace + 1))
+    done
     kill -9 "$bot_pid" 2>/dev/null || true
     break
   fi

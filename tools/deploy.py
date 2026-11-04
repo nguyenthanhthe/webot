@@ -59,19 +59,6 @@ def expected_version() -> str:
 
 
 def main() -> int:
-    # The unzip-and-swap runs as the Termux user: a fresh directory is
-    # built, the old one is moved aside and removed.  The running bot
-    # keeps its open file handles, the restart picks the new files.
-    swap = (
-        f"rm -rf {HOME}/wv-bot.new && "
-        f"mkdir -p {HOME}/wv-bot.new && "
-        f"cd {HOME}/wv-bot.new && "
-        f"{UNZIP} -oq /data/local/tmp/{ZIP} && "
-        f"rm -rf {HOME}/wv-bot.old && "
-        f"mv {HOME}/wv-bot {HOME}/wv-bot.old && "
-        f"mv {HOME}/wv-bot.new {HOME}/wv-bot && "
-        f"rm -rf {HOME}/wv-bot.old"
-    )
     print("== packaging ==")
     subprocess.run(
         [sys.executable, str(ROOT / "tools" / "package.py")],
@@ -79,12 +66,20 @@ def main() -> int:
         check=True,
     )
 
-    print("== pushing to /data/local/tmp ==")
+    print("== staging on the phone ==")
     adb("push", str(ROOT / ZIP), "/data/local/tmp/")
+    adb("push", str(ROOT / "tools" / "service_runner.sh"), "/data/local/tmp/")
+    adb("push", str(ROOT / "tools" / "bot_ctl.sh"), "/data/local/tmp/")
+    adb("push", str(ROOT / "tools" / "deploy_phone.sh"), "/data/local/tmp/deploy.sh")
 
-    print("== unpacking as the termux user ==")
-    out = adb("shell", "run-as com.termux sh -c '" + swap + "'")
-    print(out or "(no output)")
+    print("== installing (the phone's own installer) ==")
+    install = adb(
+        "shell",
+        "run-as com.termux sh -c '"
+        + "PATH=/data/data/com.termux/files/usr/bin; export PATH; sh /data/local/tmp/deploy.sh"
+        + "'",
+    )
+    print(install or "(no output)")
 
     print("== restarting the service ==")
     restart = adb(
