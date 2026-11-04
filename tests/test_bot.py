@@ -347,6 +347,15 @@ class DailyRewardTest(unittest.TestCase):
     """The daily ladder holds the whole month, so only a reward whose
     date has arrived may be picked up."""
 
+    def setUp(self) -> None:
+        # The claim writes its once-a-day marker into the state dir;
+        # every test here runs against a throwaway one.
+        self._tmp = tempfile.TemporaryDirectory()
+        patcher = mock.patch.object(config_module, "STATE_DIR", Path(self._tmp.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(self._tmp.cleanup)
+
     def test_a_reward_of_a_future_day_is_not_due(self) -> None:
         now = datetime(2026, 11, 5, tzinfo=timezone.utc)
         future = {"type": "GOLD", "amount": 25, "canBeClaimedDate": "2026-11-20T00:00:00.000Z"}
