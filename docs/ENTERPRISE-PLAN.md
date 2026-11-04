@@ -135,3 +135,22 @@ Decisions and why:
 Phases 1 and 2 are pure code on paths the test suite already covers;
 phase 3's headless-Firefox chain is the one part that needs a live
 window on the phone; phase 4 is repository work.
+
+5. **Docker packaging** - the whole product as one image, landed after
+   the phases above are done:
+
+   * `Dockerfile`: `python:3.12-slim`, the `wvbot/` package copied in,
+     `python -m wvbot` as the entrypoint.  The bot is stdlib only, so
+     the image has **zero pip installs** - it builds in seconds and
+     the attack surface is the Python runtime alone.
+   * `docker-compose.yml`: the state directory as a named volume
+     (`/data` -> the farm root: `accounts.json`, per-account state),
+     `8787` published for the dashboard, `restart: unless-stopped`,
+     and a **healthcheck** that curls `/api/farm` so the container
+     supervisor restarts a wedged farm without phone-side watchdogs.
+   * The config stays out of the image: everything durable is a
+     volume, everything secret is mode-600 inside it.
+   * Verification path: this laptop has no Docker; the image is built
+     and smoke-tested by the GitHub Actions workflow (phase 4's CI)
+     and by the operator's Docker machine.  The compose file carries
+     the healthcheck so `docker compose up` is the whole manual.
