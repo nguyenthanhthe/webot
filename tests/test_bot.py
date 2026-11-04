@@ -7,6 +7,7 @@ state directory.  Only the attributes a helper touches are attached.
 from __future__ import annotations
 
 import tempfile
+import threading
 import time
 import types
 import unittest
@@ -251,6 +252,7 @@ class MaybeChatTest(unittest.TestCase):
                 chat_messages=["hi"],
             ),
             store=StatusStore(),
+            stop_event=threading.Event(),
         )
 
     def test_off_by_default_nothing_is_sent(self) -> None:
@@ -263,12 +265,17 @@ class MaybeChatTest(unittest.TestCase):
     def test_with_messages_it_sends_sometimes(self) -> None:
         bot = self._bot(True)
         # The decision branch itself: a bot with messages and the flag
-        # on can decide to speak; the roll decides.
+        # on can decide to speak; the roll decides.  The speak runs in
+        # the queue worker, so the test waits for it.
         sent = []
         with mock.patch.object(bot_module.random.SystemRandom, "random", return_value=0.0):
             with mock.patch.object(bot, "chat", lambda sock, msg: sent.append(msg)):
                 with mock.patch.object(bot, "_hesitate", lambda *a, **k: None):
                     bot._maybe_chat(None)  # type: ignore[arg-type]
+                    for _ in range(40):
+                        if sent:
+                            break
+                        time.sleep(0.05)
         self.assertEqual(sent, ["hi"])
 
     def test_a_bad_roll_stays_silent(self) -> None:
@@ -277,6 +284,7 @@ class MaybeChatTest(unittest.TestCase):
         with mock.patch.object(bot_module.random.SystemRandom, "random", return_value=0.9):
             with mock.patch.object(bot, "chat", lambda sock, msg: sent.append(msg)):
                 bot._maybe_chat(None)  # type: ignore[arg-type]
+                time.sleep(0.3)
         self.assertEqual(sent, [])
 
 
@@ -349,6 +357,72 @@ class RoomProbeTest(unittest.TestCase):
         )
         bot._room_probe("en; DROP TABLE players")
         self.assertTrue(urls[0].endswith("language=enDROPTA"))
+
+
+class QueuedActionTest(unittest.TestCase):
+    """The human pause must run off the reader thread: a blocked
+    reader stops answering the engine pings and the server drops the
+    socket."""
+
+    def _bot(self, hesitate) -> Bot:
+        from wvbot.game import GameState, Policy
+
+        state = GameState()
+        state.apply("game-started", {"players": [{"id": 1}, {"id": 2}]})
+        return shell(
+            cfg=types.SimpleNamespace(),
+            state=state,
+            policy=Policy(),
+            store=StatusStore(),
+            _acted_keys=set(),
+            stop_event=threading.Event(),
+            _hesitate=hesitate,
+        )
+
+    def test_the_day_vote_returns_at_once_and_emits_later(self) -> None:
+        emitted = []
+        done = threading.Event()
+
+        class FakeSock:
+            def emit(self, *args):
+                emitted.append(args)
+                done.set()
+
+        def instant(low, high):
+            done.set()
+
+        bot = self._bot(instant)
+        started = time.monotonic()
+        bot._day_vote(FakeSock())
+        elapsed = time.monotonic() - started
+        # The handler itself must not wait out the pause.
+        self.assertLess(elapsed, 0.5)
+        self.assertTrue(done.wait(2.0), "the queued action never ran")
+        self.assertIn(("game-vote-to-skip",), emitted)
+
+    def test_a_stop_cancels_the_queued_action(self) -> None:
+        emitted = []
+
+        class FakeSock:
+            def emit(self, *args):
+                emitted.append(args)
+
+        bot = self._bot(lambda low, high: None)
+        bot.stop_event.set()
+        bot._day_vote(FakeSock())
+        time.sleep(0.3)
+        self.assertEqual(emitted, [])
+
+    def test_a_failing_emit_is_logged_not_raised(self) -> None:
+        class FakeSock:
+            def emit(self, *args):
+                raise OSError("socket gone")
+
+        bot = self._bot(lambda low, high: None)
+        bot._day_vote(FakeSock())  # must not raise out of the worker
+        time.sleep(0.3)
+        kinds = [e["kind"] for e in bot.store.events()]
+        self.assertIn("warn", kinds)
 
 
 class ProjectionTest(unittest.TestCase):

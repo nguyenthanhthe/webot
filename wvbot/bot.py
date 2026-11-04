@@ -944,9 +944,12 @@ class Bot:
         if random.SystemRandom().random() > 0.3:
             return
         message = random.SystemRandom().choice(list(self.cfg.chat_messages))
-        self._hesitate(5.0, 25.0)
-        self.chat(sock, message)
-        self.log_event("chat", f"said: {message}")
+
+        def speak() -> None:
+            self.chat(sock, message)
+            self.log_event("chat", f"said: {message}")
+
+        self._queue_action("chat", 5.0, 25.0, speak)
 
     def _hesitate(self, low: float = 3.0, high: float = 12.0) -> None:
         """Wait a random moment before acting.
@@ -956,6 +959,30 @@ class Bot:
         """
         delay = random.SystemRandom().uniform(low, high)
         self.stop_event.wait(delay)
+
+    def _queue_action(self, name: str, low: float, high: float, act: Any) -> None:
+        """Run an action after a human pause - off the reader thread.
+
+        Every game event arrives on the reader thread; a pause taken
+        there would stop the answers to the engine pings and the
+        server would drop the socket mid-game.  The pause therefore
+        runs in its own short-lived worker.
+        """
+        threading.Thread(
+            target=self._delayed_action,
+            args=(name, low, high, act),
+            daemon=True,
+            name="wvbot-action",
+        ).start()
+
+    def _delayed_action(self, name: str, low: float, high: float, act: Any) -> None:
+        self._hesitate(low, high)
+        if self.stop_event.is_set():
+            return
+        try:
+            act()
+        except Exception as exc:  # noqa: BLE001 - an action must not kill anything
+            self.log_event("warn", f"{name} failed: {exc}")
 
     def _night_action(self, sock: SocketIOClient) -> None:
         if not self.state.is_wolf:
@@ -968,12 +995,12 @@ class Bot:
         target = self.policy.kill_target(self.state)
         if target is None:
             return
-        self._hesitate()
-        try:
+
+        def vote() -> None:
             sock.emit("game-werewolves-vote-set", json.dumps({"targetPlayerId": target}))
             self.log_event("action", f"werewolf vote -> {target}")
-        except Exception as exc:  # noqa: BLE001
-            self.log_event("warn", f"werewolf vote failed: {exc}")
+
+        self._queue_action("werewolf vote", 3.0, 12.0, vote)
 
     def _acted(self, key: str) -> bool:
         """True when this action was already taken in the current phase.
@@ -993,8 +1020,8 @@ class Bot:
         if self._acted("day-vote"):
             return
         target = self.policy.vote_target(self.state)
-        self._hesitate()
-        try:
+
+        def vote() -> None:
             if target is None:
                 # The official client sends this one without a payload.
                 sock.emit("game-vote-to-skip")
@@ -1002,8 +1029,8 @@ class Bot:
             else:
                 sock.emit("game-day-vote-set", json.dumps({"targetPlayerId": target}))
                 self.log_event("action", f"day vote -> {target}")
-        except Exception as exc:  # noqa: BLE001
-            self.log_event("warn", f"day vote failed: {exc}")
+
+        self._queue_action("day vote", 3.0, 12.0, vote)
 
     def _killer_action(self, sock: SocketIOClient) -> None:
         event = KILLER_ROLES.get(self.state.role_id.lower())
@@ -1021,11 +1048,12 @@ class Bot:
         if target is None:
             self._acted_keys.discard(event)
             return
-        try:
+
+        def kill() -> None:
             sock.emit(event, json.dumps({"targetPlayerId": target}))
             self.log_event("action", f"{event} -> {target}")
-        except Exception as exc:  # noqa: BLE001
-            self.log_event("warn", f"{event} failed: {exc}")
+
+        self._queue_action(event, 3.0, 12.0, kill)
 
     def _protector_action(self, sock: SocketIOClient) -> None:
         """The doctor and the bodyguard pick somebody to protect."""
@@ -1037,11 +1065,12 @@ class Bot:
         target = self.policy.protect_target(self.state)
         if target is None:
             return
-        try:
+
+        def protect() -> None:
             sock.emit(event, json.dumps({"targetPlayerId": target}))
             self.log_event("action", f"{event} -> {target}")
-        except Exception as exc:  # noqa: BLE001
-            self.log_event("warn", f"{event} failed: {exc}")
+
+        self._queue_action(event, 3.0, 12.0, protect)
 
     # ------------------------------------------------------------------
     def chat(self, sock: SocketIOClient, message: str) -> None:
