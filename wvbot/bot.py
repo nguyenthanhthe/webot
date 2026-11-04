@@ -386,11 +386,15 @@ class Bot:
         # Stop as soon as the server bans us: touching it again would
         # only make the ban longer.
         while not finished.wait(timeout=1.0):
-            if self._banned.is_set():
-                break
-            if self._restart.is_set():
+            # A stop or restart request from outside ends the game here,
+            # so the leave below is still announced.  A socket that
+            # simply disappears counts as fleeing the village and the
+            # account gets banned for it.
+            if self.stop_event.is_set() or self._restart.is_set():
                 self._restart.clear()
-                self.log_event("bot", "restarting the game on request")
+                self.log_event("bot", "stop or restart request - leaving the room properly")
+                break
+            if self._banned.is_set():
                 break
             if self._session_over.is_set():
                 break
