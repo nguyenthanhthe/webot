@@ -329,6 +329,16 @@ class Bot:
             if time.time() - last_event[0] > self.cfg.silence_timeout_sec:
                 self.log_event("warn", "no server event for a long time - restarting the game")
                 break
+
+        # Leaving the room has to be announced.  A socket that simply
+        # disappears counts as "fleeing the village" and the server bans
+        # the account for it.
+        try:
+            sock.emit("mg:exit-game", {"miniGameId": game_id})
+            self.log_event("game", "left the room")
+        except Exception as exc:  # noqa: BLE001
+            self.log_event("warn", f"the leave request failed: {exc}")
+        time.sleep(1.0)
         sock.close()
 
         award = self.state.last_award
