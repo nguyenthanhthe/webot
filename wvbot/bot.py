@@ -287,11 +287,17 @@ class Bot:
             wait = self._banned_until - time.time()
             if wait > 0:
                 self.log_event("warn", f"banned for another {int(wait)}s")
-                self.store.update(status="banned")
+                self.store.update(
+                    status="banned",
+                    banned_until=time.strftime(
+                        "%H:%M:%S UTC", time.gmtime(self._banned_until)
+                    ),
+                )
                 self.stop_event.wait(min(wait + 5, 7200))
                 if self.stop_event.is_set():
                     break
                 self._banned_until = 0.0
+                self.store.update(banned_until=None)
             self._banned.clear()
 
             # A pause from the dashboard stops everything but keeps the
@@ -552,6 +558,16 @@ class Bot:
             if event in ("player-joined-and-equipped-items", "players-and-equipped-items"):
                 self.store.update(levels=self._player_levels())
         elif event == "game-over-awards-available":
+            # The raw payload goes into the log once per game: it is the
+            # ground truth a future feature (win counting) needs, and it
+            # costs nothing to write it down.
+            try:
+                self.log_event(
+                    "game",
+                    "game-over payload: " + json.dumps(parse_payload(payload))[:400],
+                )
+            except Exception:  # noqa: BLE001 - logging must not break play
+                pass
             self.state.apply(event, payload)
             self.store.update(phase="game-over")
         elif event == "error-user-banned":

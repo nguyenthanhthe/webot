@@ -55,6 +55,8 @@ class StatusStore:
             "history": {},
             # The build of the game, to notice a patch.
             "update": {},
+            # When a server ban lifts, as a UTC clock string.
+            "banned_until": None,
             # The level of every player in the room.
             "levels": [],
             "started_at": time.time(),
@@ -176,6 +178,7 @@ async function refresh() {
     ['wins', st.wins, 'ok'],
     ['reconnects', st.reconnects, st.reconnects ? 'warn' : ''],
     ['errors', st.errors, st.errors ? 'bad' : ''],
+    ...(st.banned_until ? [['banned until', st.banned_until, 'bad']] : []),
     ['uptime', Math.floor(st.uptime_sec / 60) + ' min', ''],
   ];
   document.getElementById('cards').innerHTML = cards.map(([k, v, c]) =>
