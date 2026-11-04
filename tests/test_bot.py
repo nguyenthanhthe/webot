@@ -314,6 +314,43 @@ class DailyClaimMarkerTest(unittest.TestCase):
                 self.assertEqual(len(calls), 1)
 
 
+class RoomProbeTest(unittest.TestCase):
+    def test_probe_uses_the_asia_host_when_asked(self) -> None:
+        urls = []
+
+        class FakeHttp:
+            def request(self, method, url, headers=None, **kwargs):
+                urls.append(url)
+                return {"openGames": []}
+
+        bot = shell(
+            cfg=types.SimpleNamespace(game_base_url=config_module.GAME_URL),
+            http=FakeHttp(),
+            auth=types.SimpleNamespace(auth_headers=lambda: {}),
+        )
+        bot._room_probe("en")
+        bot._room_probe("en", "asia")
+        self.assertTrue(urls[0].startswith(config_module.GAME_URL))
+        self.assertTrue(urls[1].startswith(config_module.GAME_URL_ASIA))
+        self.assertTrue(urls[0].endswith("language=en"))
+
+    def test_a_dirty_language_is_sanitised(self) -> None:
+        urls = []
+
+        class FakeHttp:
+            def request(self, method, url, headers=None, **kwargs):
+                urls.append(url)
+                return {"openGames": []}
+
+        bot = shell(
+            cfg=types.SimpleNamespace(game_base_url=config_module.GAME_URL),
+            http=FakeHttp(),
+            auth=types.SimpleNamespace(auth_headers=lambda: {}),
+        )
+        bot._room_probe("en; DROP TABLE players")
+        self.assertTrue(urls[0].endswith("language=enDROPTA"))
+
+
 class ProjectionTest(unittest.TestCase):
     def test_rate_and_hours_to_next_level(self) -> None:
         bot = shell(store=StatusStore())

@@ -33,7 +33,7 @@ from typing import Any
 from . import __version__
 from .api import GameApi
 from .auth import AuthManager
-from .config import Config, state_path
+from .config import GAME_URL_ASIA, Config, state_path
 from .dashboard import StatusStore, start_dashboard
 from .game import GameState, Policy, parse_payload, xp_to_next_level
 from .history import XpHistory
@@ -124,6 +124,17 @@ class Bot:
     def _refresh_cf_jwt(self) -> None:
         self.auth.refresh_cf_jwt()
         self.api.auth_headers = self.auth.auth_headers()
+
+    def _room_probe(self, language: str = "en", host: str = "") -> Any:
+        """The raw room list of a region, served through the dashboard.
+
+        Only the bot holds a valid attestation, so the laptop asks the
+        bot instead of the game server.  Read-only; nothing joins.
+        """
+        clean = "".join(c for c in str(language) if c.isalpha())[:8] or "en"
+        base = GAME_URL_ASIA if host == "asia" else self.cfg.game_base_url
+        url = f"{base}/api/public/game/custom?language={clean}"
+        return self.http.request("GET", url, headers=self.auth.auth_headers())
 
     def log_event(self, kind: str, message: str, **extra: Any) -> None:
         log.info("%s", message)
@@ -280,6 +291,7 @@ class Bot:
             self.cfg.dashboard_port,
             control=self._control,
             reward=self._reward,
+            rooms=self._room_probe,
         )
         self.log_event("bot", f"bot starting (v{__version__})")
         self.store.update(version=__version__)
