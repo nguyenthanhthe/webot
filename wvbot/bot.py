@@ -88,6 +88,9 @@ class Bot:
         self._restart = threading.Event()
         # Set when the server ends the game session with an error.
         self._session_over = threading.Event()
+        # The actions already taken in the current phase, so the bot
+        # acts once and not on every repeated server event.
+        self._acted_keys: set[str] = set()
 
     # ------------------------------------------------------------------
     def _load_device_id(self) -> str:
@@ -223,6 +226,7 @@ class Bot:
     def session(self) -> bool:
         """Join one room and play until the game ends or we get kicked."""
         self.state.reset()
+        self._clear_actions()
         self.store.update(status="looking for room", phase="lobby", room=None)
 
         rooms = self.api.find_rooms(self.cfg.room_names)
@@ -382,10 +386,14 @@ class Bot:
             self._protector_action(sock)
         elif event in ("game-night-started", "game-werewolves-vote-set"):
             self.state.apply(event, payload)
+            # A new night clears the actions of the last one.
+            if event == "game-night-started":
+                self._clear_actions()
             self._night_action(sock)
             self._protector_action(sock)
         elif event == "game-day-voting-started":
             self.state.apply(event, payload)
+            self._clear_actions()
             self._day_vote(sock)
         elif event == "game-day-vote-set":
             self.state.apply(event, payload)
@@ -512,6 +520,11 @@ class Bot:
     def _night_action(self, sock: SocketIOClient) -> None:
         if not self.state.is_wolf:
             return
+        # One vote per night.  The server sends the night events again
+        # for every vote in the room, and voting over and over looks
+        # like a bot.
+        if self._acted("werewolf-vote"):
+            return
         target = self.policy.kill_target(self.state)
         if target is None:
             return
@@ -522,7 +535,23 @@ class Bot:
         except Exception as exc:  # noqa: BLE001
             self.log_event("warn", f"werewolf vote failed: {exc}")
 
+    def _acted(self, key: str) -> bool:
+        """True when this action was already taken in the current phase.
+
+        The flag is cleared whenever a new phase starts, so the bot acts
+        once per night and once per day.
+        """
+        if key in self._acted_keys:
+            return True
+        self._acted_keys.add(key)
+        return False
+
+    def _clear_actions(self) -> None:
+        self._acted_keys.clear()
+
     def _day_vote(self, sock: SocketIOClient) -> None:
+        if self._acted("day-vote"):
+            return
         target = self.policy.vote_target(self.state)
         self._hesitate()
         try:
@@ -540,11 +569,17 @@ class Bot:
         event = KILLER_ROLES.get(self.state.role_id.lower())
         if not event:
             return
+        # One kill per day.  The server repeats the day vote for every
+        # player that votes, so without this the bot would shoot the
+        # same victim over and over.
+        if self._acted(event):
+            return
         data = self.state.day_votes
         target = None
         for value in data.values():
             target = value
         if target is None:
+            self._acted_keys.discard(event)
             return
         try:
             sock.emit(event, json.dumps({"targetPlayerId": target}))
@@ -556,6 +591,8 @@ class Bot:
         """The doctor and the bodyguard pick somebody to protect."""
         event = PROTECTOR_ROLES.get(self.state.role_id.lower())
         if not event:
+            return
+        if self._acted(event):
             return
         target = self.policy.protect_target(self.state)
         if target is None:
