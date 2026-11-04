@@ -32,6 +32,12 @@ class WebSocketError(RuntimeError):
     pass
 
 
+# A single message larger than this is treated as a protocol error - a
+# game event is at most a few kilobytes, and a bogus length must not
+# make the bot allocate until it dies.
+MAX_MESSAGE_BYTES = 4 * 1024 * 1024
+
+
 class WebSocket:
     def __init__(self, url: str, timeout: float = 30.0, extra_headers: dict[str, str] | None = None):
         self.url = url
@@ -41,6 +47,9 @@ class WebSocket:
         self._sock: socket.socket | None = None
         self._buffer = b""
         self.closed = False
+        # A message the peer sent in several frames arrives here until
+        # the last fragment carries it.
+        self._fragments: list[bytes] | None = None
 
     # ------------------------------------------------------------------
     def connect(self) -> None:
@@ -99,6 +108,8 @@ class WebSocket:
 
     def _read_exactly(self, count: int) -> bytes:
         assert self._sock is not None
+        if count > MAX_MESSAGE_BYTES:
+            raise WebSocketError(f"frame length {count} is over the limit")
         while len(self._buffer) < count:
             chunk = self._sock.recv(4096)
             if not chunk:
@@ -131,7 +142,11 @@ class WebSocket:
         self._send_frame(OPCODE_TEXT, text.encode("utf-8"))
 
     def recv_text(self) -> str | None:
-        """Return the next text message, or None when the peer pinged."""
+        """Return the next text message, or None when the peer closed.
+
+        A message may arrive split over several frames (big game events
+        do); the fragments are joined before the message is returned.
+        """
         while True:
             first, second = self._read_exactly(2)
             fin = bool(first & 0x80)
@@ -155,10 +170,22 @@ class WebSocket:
                 continue
             if opcode == OPCODE_PONG:
                 continue
-            if opcode == OPCODE_TEXT:
-                return payload.decode("utf-8", "replace")
-            if opcode == OPCODE_CONT:
-                return payload.decode("utf-8", "replace")
+            if opcode in (OPCODE_TEXT, OPCODE_CONT):
+                if opcode == OPCODE_TEXT and fin:
+                    # The common case: one frame, whole message.
+                    return payload.decode("utf-8", "replace")
+                if self._fragments is None and opcode == OPCODE_CONT:
+                    # A continuation without a start is a protocol error.
+                    raise WebSocketError("continuation frame without a start")
+                self._fragments = [] if self._fragments is None else self._fragments
+                self._fragments.append(payload)
+                if sum(len(part) for part in self._fragments) > MAX_MESSAGE_BYTES:
+                    raise WebSocketError("fragmented message is over the limit")
+                if not fin:
+                    continue
+                message = b"".join(self._fragments)
+                self._fragments = None
+                return message.decode("utf-8", "replace")
             # binary frames are not used by the game protocol
 
     def close(self) -> None:
