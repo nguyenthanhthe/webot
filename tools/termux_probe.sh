@@ -1,0 +1,32 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# Probe the Wolvesville API from inside the Termux app session (real network context).
+export PREFIX=/data/data/com.termux/files/usr
+export PATH="$PREFIX/bin:$PATH"
+UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+OUT=$PREFIX/tmp/probe_out.txt
+mkdir -p "$PREFIX/tmp"
+
+{
+echo "=== resolv.conf ==="
+cat "$PREFIX/etc/resolv.conf" 2>&1
+echo "=== curl version ==="
+curl --version 2>&1 | head -2
+echo "=== dns resolve ==="
+python3 -c "import socket;print(socket.gethostbyname('game.api-wolvesville.com'))" 2>&1 | tail -1
+echo "=== game.api custom list (Chrome UA) ==="
+curl -sS -o /dev/null -w "%{http_code}\n" --max-time 20 -H "User-Agent: $UA" \
+  "https://game.api-wolvesville.com/api/public/game/custom?language=en" 2>&1 | tail -1
+echo "=== game.api root (Chrome UA) ==="
+curl -sS -o /dev/null -w "%{http_code}\n" --max-time 20 -H "User-Agent: $UA" \
+  "https://game.api-wolvesville.com/" 2>&1 | tail -1
+echo "=== auth.api root (Chrome UA) ==="
+curl -sS -o /dev/null -w "%{http_code}\n" --max-time 20 -H "User-Agent: $UA" \
+  "https://auth.api-wolvesville.com/" 2>&1 | tail -1
+echo "=== api.wolvesville.com (Chrome UA) ==="
+curl -sS -o /dev/null -w "%{http_code}\n" --max-time 20 -H "User-Agent: $UA" \
+  "https://api.wolvesville.com/" 2>&1 | tail -1
+echo "=== www.wolvesville.com (Chrome UA) ==="
+curl -sS -o /dev/null -w "%{http_code}\n" --max-time 20 -H "User-Agent: $UA" \
+  "https://www.wolvesville.com/" 2>&1 | tail -1
+echo "=== done ==="
+} > "$OUT" 2>&1

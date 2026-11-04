@@ -208,7 +208,7 @@ async function runSession(browser, cfg, dash) {
 
   while (!globalThis.__wvbotStop) {
     await page.waitForTimeout(5000);
-    const alive = await page.evaluate(() => Boolean(window.__wvbot && window.__wvbot.alive)).catch(() => false);
+    const alive = await page.evaluate(() => Boolean(window.__wvbotBot && window.__wvbotBot.alive)).catch(() => false);
     if (!alive) {
       throw new Error("the injected bot stopped answering");
     }

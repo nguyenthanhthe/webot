@@ -25,6 +25,7 @@
       gameMode: "custom",
       requireAllCoupled: true,
       claimDoubleXp: true,
+      reportUrl: "http://127.0.0.1:8787/report",
     },
     window.__WV_CONFIG || {},
   );
@@ -83,23 +84,47 @@
   /* reporting                                                        */
   /* ---------------------------------------------------------------- */
 
-  function reportEvent(level, message) {
+  /**
+   * Send a report to the supervisor.
+   *
+   * On the Node/Playwright host the browser exposes a binding
+   * (`window.__wvbot`); on the phone there is no binding, so the payload
+   * posts to the local dashboard instead.
+   */
+  function post(payload) {
     try {
-      window.__wvbot({ kind: "event", level, message: String(message).slice(0, 300) });
+      if (typeof window.__wvbot === "function") {
+        window.__wvbot(payload);
+        return;
+      }
     } catch (err) {
-      /* the binding may not exist yet */
+      /* fall through to http */
     }
+    try {
+      window.fetch(CFG.reportUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      }).catch(() => {});
+    } catch (err) {
+      /* ignore */
+    }
+  }
+
+  const recentEvents = [];
+
+  function reportEvent(level, message) {
+    const entry = { t: Date.now(), level, message: String(message).slice(0, 300) };
+    recentEvents.push(entry);
+    if (recentEvents.length > 200) recentEvents.shift();
+    post({ kind: "event", level, message: entry.message });
   }
 
   function pushState(patch) {
     Object.assign(state, patch || {});
     state.players = runtime.players.size;
     state.alive = [...runtime.players.values()].filter((p) => p.isAlive).length;
-    try {
-      window.__wvbot({ kind: "state", state: { ...state } });
-    } catch (err) {
-      /* ignore */
-    }
+    post({ kind: "state", state: { ...state } });
   }
 
   /* ---------------------------------------------------------------- */
@@ -743,11 +768,17 @@
     connectLobby();
   }
 
-  window.__wvbot = Object.assign(function () {}, {
+  window.__wvbotBot = Object.assign(function () {}, {
     alive: true,
     state,
     joinRoom,
     listRooms,
+    /** Events the supervisor has not picked up yet. */
+    drainEvents() {
+      const events = recentEvents.slice();
+      recentEvents.length = 0;
+      return events;
+    },
   });
 
   if (document.readyState === "loading") {

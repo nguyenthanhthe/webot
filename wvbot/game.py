@@ -1,0 +1,330 @@
+"""Game state tracking and the decision policy of the bot.
+
+Everything here was derived from the official client sources:
+
+* server -> client events: ``game-started``, ``game-settings-changed``,
+  ``game-day-voting-started``, ``game-day-vote-set``, ``game-night-started``,
+  ``game-players-killed``, ``game-werewolves-set-roles``,
+  ``game-werewolves-vote-set``, ``game-cupid-lover-ids-and-roles``,
+  ``game-over-awards-available``, ``game-reconnect-set-players``,
+  ``game:chat-public:msg``
+* client -> server events: ``game-day-vote-set``, ``game-werewolves-vote-set``,
+  ``game-doctor-protect-player``, ``game-priest-kill-player``,
+  ``game-vigilante-shoot``, ``game-gunner-shoot-player``,
+  ``game-vote-to-skip``, ``game:chat-public:msg``
+
+Every payload arrives as a JSON *string* and has to be parsed twice
+(outer string -> object), which is why :func:`parse_payload` exists.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import random
+from dataclasses import dataclass, field
+from typing import Any, Callable
+
+log = logging.getLogger("wvbot.game")
+
+WOLF_TEAMS = {"WEREWOLF", "WOLF", "EVIL", "WEREWOLVES"}
+
+
+def parse_payload(raw: Any) -> Any:
+    """The server sends JSON-encoded strings; unwrap up to two levels."""
+    value = raw
+    for _ in range(2):
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                return value
+        else:
+            break
+    return value
+
+
+@dataclass
+class Player:
+    id: Any
+    username: str = ""
+    grid_idx: int = -1
+    is_alive: bool = True
+    role: str = ""
+    team: str = ""
+
+    @classmethod
+    def from_object(cls, raw: Any) -> "Player | None":
+        if not isinstance(raw, dict):
+            return None
+        pid = raw.get("id") or raw.get("playerId") or raw.get("_id")
+        if pid is None:
+            return None
+        role = raw.get("role")
+        if isinstance(role, dict):
+            role_id = role.get("id") or role.get("_id") or ""
+            team = role.get("team") or ""
+        else:
+            role_id = role or ""
+            team = raw.get("team") or ""
+        return cls(
+            id=pid,
+            username=str(raw.get("username") or raw.get("name") or ""),
+            grid_idx=int(raw.get("gridIdx", raw.get("gridIndex", -1)) or -1),
+            is_alive=bool(raw.get("isAlive", True)),
+            role=str(role_id),
+            team=str(team),
+        )
+
+
+@dataclass
+class GameState:
+    game_id: Any = None
+    server_url: str = ""
+    role_id: str = ""
+    role_name: str = ""
+    role_team: str = ""
+    players: list[Player] = field(default_factory=list)
+    dead_ids: list[Any] = field(default_factory=list)
+    lover_id: Any = None
+    phase: str = "lobby"
+    day_votes: dict[Any, Any] = field(default_factory=dict)
+    night_votes: dict[Any, Any] = field(default_factory=dict)
+    messages: list[dict[str, Any]] = field(default_factory=list)
+    last_award: dict[str, Any] = field(default_factory=dict)
+
+    # -- helpers -------------------------------------------------------
+    def by_id(self, pid: Any) -> Player | None:
+        for player in self.players:
+            if player.id == pid:
+                return player
+        return None
+
+    @property
+    def alive(self) -> list[Player]:
+        return [p for p in self.players if p.is_alive and p.id not in self.dead_ids]
+
+    @property
+    def is_wolf(self) -> bool:
+        return self.role_team.upper() in WOLF_TEAMS or self.role_id.lower() in (
+            "werewolf",
+            "alpha-werewolf",
+            "big-wolf",
+        )
+
+    def reset(self) -> None:
+        self.game_id = None
+        self.server_url = ""
+        self.role_id = ""
+        self.role_name = ""
+        self.role_team = ""
+        self.players = []
+        self.dead_ids = []
+        self.lover_id = None
+        self.phase = "lobby"
+        self.day_votes = {}
+        self.night_votes = {}
+        self.messages = []
+        self.last_award = {}
+
+    # -- ingest --------------------------------------------------------
+    def apply(self, event: str, raw: Any) -> None:
+        data = parse_payload(raw)
+        if event == "game-started":
+            self._on_started(data)
+        elif event == "game-settings-changed":
+            self.phase = "settings"
+        elif event == "game-day-voting-started":
+            self.phase = "day-voting"
+        elif event == "game-night-started":
+            self.phase = "night"
+        elif event == "game-players-killed":
+            self._on_killed(data)
+        elif event == "game-werewolves-set-roles":
+            self._on_wolf_roles(data)
+        elif event == "game-werewolves-vote-set":
+            self.phase = "night-voting"
+            if isinstance(data, dict) and "targetPlayerId" in data:
+                self.night_votes[self.own_id()] = data["targetPlayerId"]
+        elif event == "game-day-vote-set":
+            if isinstance(data, dict) and "targetPlayerId" in data:
+                self.day_votes[data.get("authorId") or self.own_id()] = data["targetPlayerId"]
+        elif event == "game-cupid-lover-ids-and-roles":
+            if isinstance(data, dict):
+                self.lover_id = data.get("loverId") or data.get("loverPlayerId")
+        elif event == "game-over-awards-available":
+            if isinstance(data, dict):
+                self.phase = "game-over"
+                award = data.get("playerAward") or {}
+                self.last_award = award if isinstance(award, dict) else {}
+        elif event == "game:chat-public:msg":
+            if isinstance(data, dict):
+                self.messages.append(data)
+                del self.messages[:-200]
+        elif event == "game-reconnect-set-players":
+            self._on_reconnect(data)
+
+    def _on_started(self, data: Any) -> None:
+        if not isinstance(data, dict):
+            return
+        self.phase = "started"
+        role = data.get("role")
+        if isinstance(role, dict):
+            self.role_id = str(role.get("id") or role.get("_id") or "")
+            self.role_name = str(role.get("name") or "")
+            self.role_team = str(role.get("team") or "")
+        elif isinstance(role, str):
+            self.role_id = role
+        players = data.get("players")
+        if isinstance(players, list):
+            parsed = [Player.from_object(p) for p in players]
+            self.players = [p for p in parsed if p]
+        log.info(
+            "game started: role=%s team=%s players=%d",
+            self.role_id or "?",
+            self.role_team or "?",
+            len(self.players),
+        )
+
+    def _on_killed(self, data: Any) -> None:
+        ids: list[Any] = []
+        if isinstance(data, list):
+            ids = data
+        elif isinstance(data, dict):
+            for key in ("playerIds", "ids", "killedPlayerIds", "players"):
+                value = data.get(key)
+                if isinstance(value, list):
+                    ids = value
+                    break
+            else:
+                single = data.get("playerId") or data.get("id")
+                if single is not None:
+                    ids = [single]
+        for pid in ids:
+            if pid not in self.dead_ids:
+                self.dead_ids.append(pid)
+            player = self.by_id(pid)
+            if player:
+                player.is_alive = False
+
+    def _on_wolf_roles(self, data: Any) -> None:
+        if not isinstance(data, dict):
+            return
+        entries = data.get("roles") or data.get("players") or data
+        if isinstance(entries, dict):
+            entries = list(entries.values())
+        if not isinstance(entries, list):
+            return
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            pid = entry.get("playerId") or entry.get("id")
+            player = self.by_id(pid)
+            if player is None:
+                continue
+            role = entry.get("role")
+            if isinstance(role, dict):
+                player.role = str(role.get("id") or "")
+                player.team = str(role.get("team") or "")
+            elif role:
+                player.role = str(role)
+
+    def _on_reconnect(self, data: Any) -> None:
+        if not isinstance(data, dict):
+            return
+        for pid, info in data.items():
+            if not isinstance(info, dict):
+                continue
+            player = self.by_id(pid)
+            if player is None:
+                continue
+            alive = info.get("isAlive")
+            if alive is not None:
+                player.is_alive = bool(alive)
+                if not alive and pid not in self.dead_ids:
+                    self.dead_ids.append(pid)
+
+    def own_id(self) -> Any:
+        return getattr(self, "_own_id", None)
+
+    def set_own_id(self, pid: Any) -> None:
+        self._own_id = pid
+
+
+class Policy:
+    """Turns the observed game state into the next action.
+
+    The goal is a win rate high enough to farm XP, not optimal play:
+
+    * villagers vote for whoever the room accuses most often
+    * werewolves kill a living non-teammate, preferring players who are
+      not accusing them
+    * the killing roles (priest / vigilante / gunner) act on the player the
+      day vote landed on
+    """
+
+    def __init__(self, cfg: Any = None):
+        self.cfg = cfg
+        # SystemRandom: no prediction value needed, and it keeps the linter
+        # happy about weak randomness.
+        self.rng = random.SystemRandom()
+
+    # -- voting --------------------------------------------------------
+    def _accusation_counts(self, state: GameState) -> dict[Any, int]:
+        counts: dict[Any, int] = {}
+        for message in state.messages:
+            if not isinstance(message, dict):
+                continue
+            text = str(message.get("msg") or "")
+            lowered = text.lower()
+            if not any(word in lowered for word in ("wolf", "sus", "vote", "susp", "werewolf")):
+                continue
+            author = message.get("authorId")
+            for player in state.players:
+                if player.id == author:
+                    continue
+                if player.username and player.username.lower() in lowered:
+                    counts[player.id] = counts.get(player.id, 0) + 1
+        return counts
+
+    def vote_target(self, state: GameState) -> Any | None:
+        alive = state.alive
+        if not alive:
+            return None
+        counts = self._accusation_counts(state)
+        if counts:
+            return max(counts.items(), key=lambda item: item[1])[0]
+        # No information: vote for someone the room has already voted for,
+        # otherwise skip the vote entirely.
+        if state.day_votes:
+            return None
+        return None
+
+    def skip_vote(self) -> bool:
+        """Skip when there is no signal at all - avoids a random lynching."""
+        return True
+
+    # -- night ---------------------------------------------------------
+    def kill_target(self, state: GameState) -> Any | None:
+        candidates = [
+            p
+            for p in state.alive
+            if p.id != state.own_id()
+            and p.role.lower() not in WOLF_TEAMS
+            and p.team.upper() not in WOLF_TEAMS
+        ]
+        if not candidates:
+            candidates = [p for p in state.alive if p.id != state.own_id()]
+        if not candidates:
+            return None
+        # Prefer a player nobody accused.
+        counts = self._accusation_counts(state)
+        quiet = [p for p in candidates if counts.get(p.id, 0) == 0]
+        pool = quiet or candidates
+        return self.rng.choice(pool).id
+
+    def protect_target(self, state: GameState) -> Any | None:
+        alive = [p for p in state.alive if p.id != state.own_id()]
+        if not alive:
+            return None
+        return self.rng.choice(alive).id

@@ -1,0 +1,20 @@
+{
+  "email": "",
+  "password": "",
+  "refresh_token": "",
+  "cf_jwt": "",
+  "room_names": ["vill win"],
+  "language": "en",
+  "game_mode": "custom",
+  "use_asia_host": false,
+  "claim_double_xp": true,
+  "chat_enabled": false,
+  "reconnect_delay_sec": 5.0,
+  "reconnect_delay_max_sec": 120.0,
+  "idle_restart_sec": 900.0,
+  "request_timeout_sec": 20.0,
+  "max_retries": 3,
+  "dashboard_host": "0.0.0.0",
+  "dashboard_port": 8787,
+  "log_level": "INFO"
+}
