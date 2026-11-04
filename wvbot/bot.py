@@ -65,6 +65,8 @@ class Bot:
         # Set when the server bans us; the run loop waits it out.
         self._banned_until = 0.0
         self._banned = threading.Event()
+        # Timestamps of the recent joins, used to slow down on our own.
+        self._join_times: list[float] = []
 
     # ------------------------------------------------------------------
     def _load_device_id(self) -> str:
@@ -84,6 +86,37 @@ class Bot:
     def log_event(self, kind: str, message: str, **extra: Any) -> None:
         log.info("%s", message)
         self.store.add_event(kind, message, **extra)
+
+    # ------------------------------------------------------------------
+    # pacing
+    # ------------------------------------------------------------------
+    def _next_delay(self) -> float:
+        """How long to wait before the next game.
+
+        A flat delay is a fingerprint in itself, so the wait is drawn
+        from a range.  When the bot has joined a lot of games in the last
+        hour it waits longer on top of that.
+        """
+        low = max(0.0, self.cfg.delay_min_sec)
+        high = max(low, self.cfg.delay_max_sec)
+        delay = random.SystemRandom().uniform(low, high)
+        if self._joins_in_hour() >= self.cfg.joins_per_hour:
+            delay += 300
+            self.log_event(
+                "lobby",
+                f"{self._joins_in_hour()} joins in the last hour - waiting longer",
+            )
+        return delay
+
+    def _joins_in_hour(self) -> int:
+        """How many games were joined in the last hour."""
+        cutoff = time.time() - 3600
+        self._join_times = [stamp for stamp in self._join_times if stamp > cutoff]
+        return len(self._join_times)
+
+    def _note_join(self) -> None:
+        self._join_times.append(time.time())
+        self._joins_in_hour()
 
     # ------------------------------------------------------------------
     def run(self) -> None:
@@ -116,7 +149,9 @@ class Bot:
                 self._backoff = self.cfg.reconnect_delay_sec
                 # Always pause between games: joining back to back is
                 # what gets the account banned.
-                self.stop_event.wait(self.cfg.reconnect_delay_sec)
+                delay = self._next_delay()
+                self.log_event("lobby", f"next game in {int(delay)}s")
+                self.stop_event.wait(delay)
                 if not played:
                     continue
             except Exception as exc:  # noqa: BLE001 - the supervisor must not die
@@ -148,6 +183,7 @@ class Bot:
         room_name = GameApi._room_name(room)
         self.log_event("lobby", f"joining room '{room_name}' (id={room_id})")
         self.store.update(status="joining", room=room_name)
+        self._note_join()
 
         token = self.auth.ensure_token()
         self.api.auth_headers = self.auth.auth_headers()
@@ -290,12 +326,22 @@ class Bot:
     # -- actions -------------------------------------------------------
     # The official client sends every game payload as a JSON *string*;
     # only the ad reward takes a plain object.
+    def _hesitate(self, low: float = 3.0, high: float = 12.0) -> None:
+        """Wait a random moment before acting.
+
+        Voting the instant the voting opens is a tell; a human takes a
+        few seconds to read the chat first.
+        """
+        delay = random.SystemRandom().uniform(low, high)
+        self.stop_event.wait(delay)
+
     def _night_action(self, sock: SocketIOClient) -> None:
         if not self.state.is_wolf:
             return
         target = self.policy.kill_target(self.state)
         if target is None:
             return
+        self._hesitate()
         try:
             sock.emit("game-werewolves-vote-set", json.dumps({"targetPlayerId": target}))
             self.log_event("action", f"werewolf vote -> {target}")
@@ -304,6 +350,7 @@ class Bot:
 
     def _day_vote(self, sock: SocketIOClient) -> None:
         target = self.policy.vote_target(self.state)
+        self._hesitate()
         try:
             if target is None:
                 sock.emit("game-vote-to-skip", json.dumps({}))

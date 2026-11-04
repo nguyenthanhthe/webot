@@ -89,8 +89,15 @@ class Config:
     # generous rather than quick.
     reconnect_delay_sec: float = 60.0
     reconnect_delay_max_sec: float = 300.0
+    # A flat delay is a fingerprint in itself, so the wait is drawn from
+    # a range.  This is what RXZBot calls "human behaviour".
+    delay_min_sec: float = 45.0
+    delay_max_sec: float = 150.0
     # Seconds of "play then leave" before recycling into a fresh room.
     idle_restart_sec: float = 900.0
+    # How many games may be joined per hour before the bot backs off on
+    # its own.  The server bans accounts that join too often.
+    joins_per_hour: int = 12
     request_timeout_sec: float = 20.0
     max_retries: int = 3
 
