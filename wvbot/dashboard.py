@@ -41,6 +41,11 @@ class StatusStore:
             "reconnects": 0,
             "errors": 0,
             "last_error": None,
+            # From the account profile.
+            "username": None,
+            "level": None,
+            "account_xp": None,
+            "games_finished": None,
             "started_at": time.time(),
             "updated_at": time.time(),
         }
@@ -97,13 +102,18 @@ PAGE = """<!doctype html>
 const fmt = s => new Date(s * 1000).toLocaleTimeString();
 async function refresh() {
   const st = await (await fetch('/api/status')).json();
+  const rate = st.uptime_sec > 60 ? Math.round(st.xp_total / (st.uptime_sec / 3600)) : 0;
   const cards = [
-    ['status', st.status, st.status === 'running' ? 'ok' : 'warn'],
+    ['status', st.status, st.status === 'running' || st.status === 'playing' ? 'ok' : 'warn'],
+    ['account', st.username || '-', ''],
+    ['level', st.level === null || st.level === undefined ? '-' : st.level, 'ok'],
+    ['account xp', st.account_xp === null || st.account_xp === undefined ? '-' : st.account_xp, 'ok'],
     ['phase', st.phase || '-', ''],
     ['room', st.room || '-', ''],
     ['role', st.role || '-', ''],
     ['players', st.players, ''],
-    ['xp total', st.xp_total, 'ok'],
+    ['xp farmed', st.xp_total, 'ok'],
+    ['xp / hour', rate, ''],
     ['xp last game', st.xp_last, ''],
     ['games', st.games_played, ''],
     ['wins', st.wins, 'ok'],

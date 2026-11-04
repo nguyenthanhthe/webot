@@ -40,6 +40,7 @@ MEMBERS = [
     (ROOT / "tools" / "probe_socket.py", "probe_socket.py"),
     (ROOT / "tools" / "check_hosts.py", "check_hosts.py"),
     (ROOT / "tools" / "show_lines.py", "show_lines.py"),
+    (ROOT / "tools" / "probe_own_id.py", "probe_own_id.py"),
     # The payload is shared with the Node/Playwright runner and lives at the
     # root of the package on the phone.
     (ROOT / "web" / "payload.js", "payload.js"),

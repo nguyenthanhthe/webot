@@ -67,6 +67,8 @@ class Bot:
         self._banned = threading.Event()
         # Timestamps of the recent joins, used to slow down on our own.
         self._join_times: list[float] = []
+        # The player id of the logged-in account, learned from the profile.
+        self._own_player_id: Any = None
 
     # ------------------------------------------------------------------
     def _load_device_id(self) -> str:
@@ -126,6 +128,7 @@ class Bot:
             self.auth.ensure_token()
             self.api.auth_headers = self.auth.auth_headers()
             self.log_event("auth", "authenticated")
+            self._read_profile()
         except Exception as exc:  # noqa: BLE001 - keep the loop alive
             self.store.update(status="error", last_error=str(exc), errors=1)
             self.log_event("error", f"initial auth failed: {exc}")
@@ -275,6 +278,7 @@ class Bot:
         payload = args[0] if args else None
         if event == "game-started":
             self.state.apply(event, payload)
+            self._find_own_id()
             self.store.update(
                 role=self.state.role_name or self.state.role_id,
                 players=len(self.state.players),
@@ -324,6 +328,71 @@ class Bot:
             self.log_event("game", f"{event}")
 
     # -- actions -------------------------------------------------------
+    def _find_own_id(self) -> None:
+        """Work out which player in the list is the bot.
+
+        The player id comes from the profile; if that is not available,
+        the player that carries the role the server handed us is us.
+        """
+        if self.state.own_id() is not None:
+            return
+        if not self._own_player_id:
+            try:
+                self._own_player_id = self.api.get_own_player_id(self.device_id)
+            except Exception as exc:  # noqa: BLE001 - advisory only
+                log.debug("could not read the player profile: %s", exc)
+                self._own_player_id = None
+        own = self._own_player_id
+        if own:
+            self.state.set_own_id(own)
+            return
+        # Fall back: the player whose role equals the one the server
+        # gave us is the bot.
+        role = (self.state.role_id or "").lower()
+        if not role:
+            return
+        for player in self.state.players:
+            if (player.role or "").lower() == role:
+                self.state.set_own_id(player.id)
+                log.info("own player id: %s", player.id)
+                return
+
+    def _read_profile(self) -> None:
+        """Read the account profile.
+
+        The profile carries the level, the total xp and - importantly -
+        the time until the ban ends, so the bot knows when it may play
+        again without having to try.
+        """
+        try:
+            profile = self.api.get_profile()
+        except Exception as exc:  # noqa: BLE001 - advisory only
+            log.debug("could not read the profile: %s", exc)
+            return
+        if not profile:
+            return
+        stats = self.store.get()
+        self.store.update(
+            username=profile.get("username"),
+            level=profile.get("level"),
+            account_xp=profile.get("xpTotal"),
+            games_finished=profile.get("finishedGamesCount"),
+        )
+        banned_until = _parse_ban_until(str(profile.get("bannedUntilTime") or ""))
+        if banned_until > time.time():
+            self._banned_until = banned_until
+            self.log_event(
+                "warn",
+                "the account is banned until "
+                + time.strftime("%H:%M:%S UTC", time.gmtime(banned_until)),
+            )
+        log.info(
+            "profile: %s level %s, %s xp",
+            profile.get("username"),
+            profile.get("level"),
+            profile.get("xpTotal"),
+        )
+
     # The official client sends every game payload as a JSON *string*;
     # only the ad reward takes a plain object.
     def _hesitate(self, low: float = 3.0, high: float = 12.0) -> None:

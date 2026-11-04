@@ -118,6 +118,58 @@ class GameApi:
         url = f"{CORE_URL}/players/meAndCheckAppVersion"
         return self.http.request("GET", url, headers=self.auth_headers)
 
+    def get_own_player_id(self, device_id: str = "") -> Any:
+        """The id of the logged-in player.
+
+        The official client keeps it in the player profile; the bot needs
+        it to recognise itself in the player list of a game.
+        """
+        data = self.http.request(
+            "PUT",
+            f"{CORE_URL}/players/meAndCheckAppVersion",
+            body={
+                "versionNumber": "0",
+                "platform": "web",
+                "steamId": "",
+                "fcmToken": "",
+                "pushTokenDeletedOnLogout": True,
+                "deviceId": device_id,
+                "deviceSecurityLevel": "UNKNOWN",
+                "locale": self.cfg.language,
+            },
+            headers=self.auth_headers,
+        )
+        if isinstance(data, dict):
+            # The endpoint wraps the profile in a "player" object.
+            player = data.get("player")
+            if isinstance(player, dict):
+                return player.get("id") or player.get("playerId")
+            return data.get("id") or data.get("playerId") or data.get("_id")
+        return None
+
+    def get_profile(self) -> dict[str, Any]:
+        """The player profile: level, xp, ban state and the account name."""
+        data = self.http.request(
+            "PUT",
+            f"{CORE_URL}/players/meAndCheckAppVersion",
+            body={
+                "versionNumber": "0",
+                "platform": "web",
+                "steamId": "",
+                "fcmToken": "",
+                "pushTokenDeletedOnLogout": True,
+                "deviceId": "",
+                "deviceSecurityLevel": "UNKNOWN",
+                "locale": self.cfg.language,
+            },
+            headers=self.auth_headers,
+        )
+        if isinstance(data, dict):
+            player = data.get("player")
+            if isinstance(player, dict):
+                return player
+        return {}
+
 
 def looks_like_room_name(blob: Any, needle: str) -> bool:
     """Fallback room matcher that scans a raw JSON blob for the name."""
