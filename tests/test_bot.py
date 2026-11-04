@@ -229,6 +229,43 @@ class NightlyRestartTest(unittest.TestCase):
                 self.assertFalse(bot._nightly_restart_due())
 
 
+class MaybeChatTest(unittest.TestCase):
+    def _bot(self, enabled: bool) -> Bot:
+        return shell(
+            cfg=types.SimpleNamespace(
+                chat_enabled=enabled,
+                chat_messages=["hi"],
+            ),
+            store=StatusStore(),
+        )
+
+    def test_off_by_default_nothing_is_sent(self) -> None:
+        from wvbot.config import Config
+
+        self.assertFalse(Config().chat_enabled)
+        bot = self._bot(False)
+        self.assertIsNone(bot._maybe_chat(None))  # type: ignore[arg-type]
+
+    def test_with_messages_it_sends_sometimes(self) -> None:
+        bot = self._bot(True)
+        # The decision branch itself: a bot with messages and the flag
+        # on can decide to speak; the roll decides.
+        sent = []
+        with mock.patch.object(bot_module.random.SystemRandom, "random", return_value=0.0):
+            with mock.patch.object(bot, "chat", lambda sock, msg: sent.append(msg)):
+                with mock.patch.object(bot, "_hesitate", lambda *a, **k: None):
+                    bot._maybe_chat(None)  # type: ignore[arg-type]
+        self.assertEqual(sent, ["hi"])
+
+    def test_a_bad_roll_stays_silent(self) -> None:
+        bot = self._bot(True)
+        sent = []
+        with mock.patch.object(bot_module.random.SystemRandom, "random", return_value=0.9):
+            with mock.patch.object(bot, "chat", lambda sock, msg: sent.append(msg)):
+                bot._maybe_chat(None)  # type: ignore[arg-type]
+        self.assertEqual(sent, [])
+
+
 class ProjectionTest(unittest.TestCase):
     def test_rate_and_hours_to_next_level(self) -> None:
         bot = shell(store=StatusStore())

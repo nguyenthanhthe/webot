@@ -73,7 +73,7 @@ def main() -> int:
 
     print("=== bot status ===")
     for key in (
-        "status", "phase", "room", "game_id", "role", "players", "alive",
+        "version", "status", "phase", "room", "game_id", "role", "players", "alive",
         "games_played", "wins", "xp_total", "xp_last", "kills",
         "reconnects", "errors", "uptime_sec",
     ):

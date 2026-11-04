@@ -20,6 +20,10 @@ and the project uses [semantic versioning](https://semver.org/).
 - The **daily reward waits for its date**: a rung whose
   `canBeClaimedDate` has not arrived is left alone instead of being
   posted again every loop (found with `tools/probe_daily.py`).
+- An **optional greeting**: with `chat_messages` filled and
+  `chat_enabled` on, the bot says one of the lines with a 30% chance
+  after a human pause when the game starts.  Off by default.
+- `tools/status.py` prints the **running version** next to the status.
 
 Planned work, see `docs/FEATURE-PLAN.md` for the full list.
 
