@@ -9,6 +9,55 @@ and the project uses [semantic versioning](https://semver.org/).
 
 Planned work, see `docs/FEATURE-PLAN.md` for the full list.
 
+## [0.0.5] - 2026-11-05
+
+The 24/7 hardening release: every way the run could die now has a
+recovery behind it, and the farming got smarter.
+
+### Added
+
+- **The room choice prefers the richer rooms** (`regularXp`), still
+  random within the top pool.
+- **A nightly self-restart** at `daily_restart_hour` via `os.execv`;
+  the restart day and every other "already done today" marker live in
+  the state dir, because the exec wipes the memory.
+- **A heartbeat for the outside watchdog**: the run loop touches
+  `heartbeat.txt`; a bot that holds the lock but stopped beating for
+  over two hours is killed by the JobScheduler watchdog and started
+  fresh.  The watchdog also **rotates `wv-bot.log` in place** past
+  5 MB.
+- **`/api/rooms` on the dashboard**: the raw room list of any region
+  (optionally the asia host), fetched with the bot's own attestation -
+  the gateway the region survey runs through.  The survey found: the
+  vill-win rooms live in the EN set, the night lull is real scarcity,
+  and `regularXp` is a boolean flag.
+- **The daily reward waits for its date** and is attempted **once per
+  day**; a refused claim logs the server's answer instead of a fake
+  success.
+- **An optional greeting** (off by default) and the running version
+  in `tools/status.py`.
+- Daemon threads that die are logged (`threading.excepthook`).
+
+### Fixed
+
+- **The vote could land on a dead player**, the room could make the
+  bot **vote for itself**, and `reset()` leaked the own player id.
+- **Fragmented websocket frames** were parsed as separate messages -
+  big game events arrived truncated and the bot played blind.
+- **A dead game socket** hung the session until the silence watchdog;
+  the reader dispatches "disconnect" now and a bogus frame length is
+  refused.
+- **The service stop killed the bot with SIGKILL** - every restart
+  looked like fleeing the village.  SIGTERM first, 12 s grace.
+- **Every game action hesitated on the reader thread**, blocking the
+  engine pings; actions run in queue workers now.
+- **A chatty handshake** (pings before the namespace ack) exhausted
+  the 10-packet budget and failed the connect.
+- The installer no longer overwrites a **rotated refresh token**;
+  a rotated token is persisted the moment it arrives.
+- A failing **nightly exec** is logged and the loop carries on.
+- `tools/status.py` showed 1970 event times; the store keeps seconds.
+
 ## [0.0.4] - 2026-11-05
 
 The farming is smarter and the 24/7 run survives its own restarts.
