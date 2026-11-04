@@ -86,6 +86,8 @@ class Bot:
         # Set by the dashboard: pause the bot, or restart the session.
         self._paused = threading.Event()
         self._restart = threading.Event()
+        # Set when the server ends the game session with an error.
+        self._session_over = threading.Event()
 
     # ------------------------------------------------------------------
     def _load_device_id(self) -> str:
@@ -258,17 +260,25 @@ class Bot:
             auth["Cf-JWT"] = self.auth.cf_jwt
         return auth
 
+    @staticmethod
+    def _nonce() -> int:
+        """A random number between 42 and 99, like the official client."""
+        return random.SystemRandom().randint(42, 99)
+
     def _play_game(self, token: str, game_id: Any, server_url: str) -> bool:
-        # The official client puts the firebase token in the handshake
-        # auth and the game id in the query.
+        self._session_over.clear()
+        # A custom game is played on the LOBBY socket.  The client
+        # emits "mg:join-open-game" with the room id and the server
+        # sends the whole game (game-started, the votes, the awards) on
+        # that same socket.  A separate game socket with the game id in
+        # the query always answers "error-game-connection-lost".
         sock = SocketIOClient(
             server_url,
             query={
-                "gameId": game_id,
-                "gameMode": self.cfg.game_mode,
-                "reconnect": "true",
+                "firebaseToken": token,
                 "ids": 1,
                 "apiV": 1,
+                "b": self._nonce(),
                 "deviceId": self.device_id,
             },
             auth=self._socket_auth(token),
@@ -292,6 +302,16 @@ class Bot:
             self.log_event("error", f"game socket failed: {exc}")
             return False
 
+        # The join itself: the room id goes to the lobby socket.  The
+        # official client sends a plain object here.
+        time.sleep(2.0)
+        try:
+            sock.emit("mg:join-open-game", {"miniGameId": game_id})
+        except Exception as exc:  # noqa: BLE001
+            self.log_event("error", f"the join request failed: {exc}")
+            sock.close()
+            return False
+
         self.store.update(status="playing")
         # Stop as soon as the server bans us: touching it again would
         # only make the ban longer.
@@ -301,6 +321,8 @@ class Bot:
             if self._restart.is_set():
                 self._restart.clear()
                 self.log_event("bot", "restarting the game on request")
+                break
+            if self._session_over.is_set():
                 break
             # A socket that stays open but says nothing is a hang: the
             # game is over on the server and we would sit here for hours.
@@ -393,9 +415,12 @@ class Bot:
         elif event.startswith("error-"):
             # The server refused something: the game was closed, we were
             # kicked, or the room vanished.  Either way the session is
-            # over and a new room has to be found.
+            # over and a new room has to be found.  The session is ended
+            # right away - waiting for the silence timeout would keep a
+            # dead game open for minutes.
             self.log_event("warn", f"server error: {event} {str(payload)[:120]}")
             self.store.update(last_error=event)
+            self._session_over.set()
 
     # -- actions -------------------------------------------------------
     def _find_own_id(self) -> None:

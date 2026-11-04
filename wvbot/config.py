@@ -72,8 +72,15 @@ class Config:
 
     # --- what to farm --------------------------------------------------
     # Room names to join in the custom-game list. "vill win" is the English
-    # region room the operator reported as continuously populated.
+    # region room the operator reported as continuously populated.  The
+    # matching is word based, so this also covers "village win" and
+    # "24HR VILL WIN NT (E)".
     room_names: list[str] = field(default_factory=lambda: ["vill win"])
+    # Rooms with a password are skipped by default: the server refuses
+    # the join without it.
+    allow_password_rooms: bool = False
+    # The password of the rooms, when they all share the same one.
+    room_password: str = ""
     language: str = "en"
     game_mode: str = "custom"
     # Asia routing: the English lobby lives on game.api-wolvesville.com,
