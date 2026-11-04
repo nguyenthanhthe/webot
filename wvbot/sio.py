@@ -124,18 +124,34 @@ class SocketIOClient:
                 log.exception("handler failed for %s", event)
 
     def _read_loop(self) -> None:
-        assert self.ws is not None
+        # close() from another thread can clear the socket between the
+        # start and here; a loop without a socket simply does nothing.
+        if self.ws is None:
+            return
+        died = False
         while not self._closed.is_set():
             try:
                 raw = self.ws.recv_text()
             except (WebSocketError, OSError) as exc:
                 if not self._closed.is_set():
                     log.warning("socket read error: %s", exc)
+                died = True
                 break
             if raw is None:
+                died = True
                 break
-            self._handle_packet(raw)
+            try:
+                self._handle_packet(raw)
+            except Exception:  # noqa: BLE001 - a bad packet must not kill the reader
+                log.exception("packet handling failed")
+                died = True
+                break
         self.connected = False
+        # A socket that died on its own must not leave the session
+        # hanging: the caller registered a "disconnect" handler and only
+        # the dispatch below makes it fire.
+        if died and not self._closed.is_set():
+            self._dispatch("disconnect", [])
 
     def _handle_packet(self, raw: str) -> None:
         if not raw:

@@ -135,10 +135,32 @@ class AuthManager:
         new_refresh = data.get("refreshToken")
         if new_refresh:
             self.refresh_token = new_refresh
+            self._persist_refresh_token(new_refresh)
         self.id_token = id_token
         self._token_exp = _jwt_exp(id_token)
         log.info("minted a new idToken (expires at %s)", self._token_exp)
         return id_token
+
+    def _persist_refresh_token(self, token: str) -> None:
+        """Keep the durable credential current on disk.
+
+        Firebase can hand out a rotated refresh token: the fresh one is
+        then the only valid credential, so it is written back to the
+        state file the moment it arrives.
+        """
+        try:
+            from .config import REFRESH_TOKEN_FILE, state_path
+
+            path = state_path(REFRESH_TOKEN_FILE)
+            path.write_text(token + "\n", encoding="utf-8")
+            try:
+                import os
+
+                os.chmod(path, 0o600)
+            except OSError:  # noqa: F841 - advisory only (e.g. Windows)
+                pass
+        except OSError as exc:
+            log.warning("could not store the rotated refresh token: %s", exc)
 
     # ------------------------------------------------------------------
     def ensure_token(self, force: bool = False) -> str:

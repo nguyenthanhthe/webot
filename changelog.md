@@ -48,6 +48,24 @@ like a cautious human and the dashboard shows the value.
   bot's own id out now.
 - `reset()` kept the **own player id** of the last game.
 - A `gridIdx` of **0** (the first slot) was read as -1.
+- The stop or restart of the service **dropped the game socket
+  silently** - exactly the fleeing-the-village behaviour the server
+  bans for.  The play loop now ends on the request and announces
+  `mg:exit-game` before the socket closes.
+- A refused **daily reward claim** was logged as a success; the log
+  carries the server's answer now.
+- A **dead game socket** left the session hanging until the silence
+  watchdog (300 s): the reader thread swallowed packet errors and the
+  "disconnect" handler was dead code.  It dispatches now, and a broken
+  packet ends the session the same way.
+- The dashboard **phase card** stayed on "started" after the first
+  phase change; it follows the night and the day vote now.
+
+### Changed
+
+- `tools/deploy.py` replaces the hand-typed adb chain: one command
+  packages, pushes, unpacks (run-as), swaps the directory, restarts
+  the service and verifies the version on the dashboard.
 
 ## [0.0.2] - 2026-11-04
 
