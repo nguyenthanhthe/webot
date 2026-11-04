@@ -682,6 +682,11 @@ class Bot:
             return
         kind = str(due[0].get("type") or "reward")
         amount = due[0].get("amount")
+        # One attempt per day per rung: a rung the server keeps
+        # refusing must not be posted again on every round.
+        if self._daily_claim_attempted(kind):
+            return
+        self._note_daily_claim_attempt(kind)
         try:
             result = rewards.claim_daily_reward()
         except Exception as exc:  # noqa: BLE001
@@ -691,6 +696,25 @@ class Bot:
         # refused must not read as a success.
         detail = json.dumps(result)[:200] if result else "server answered nothing"
         self.log_event("reward", f"daily reward {kind} x{amount} -> {detail}")
+
+    def _daily_claim_attempted(self, kind: str) -> bool:
+        """True when this rung was already tried today."""
+        return self._load_claim_marker() == f"{_day_key_now()}|{kind}"
+
+    def _note_daily_claim_attempt(self, kind: str) -> None:
+        self._save_claim_marker(f"{_day_key_now()}|{kind}")
+
+    def _load_claim_marker(self) -> str:
+        try:
+            return state_path("daily_claim.txt").read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
+
+    def _save_claim_marker(self, value: str) -> None:
+        try:
+            state_path("daily_claim.txt").write_text(value + "\n", encoding="utf-8")
+        except OSError as exc:
+            log.warning("could not record the daily claim attempt: %s", exc)
 
     @staticmethod
     def _reward_is_due(reward: dict[str, Any], now: datetime) -> bool:
@@ -1011,6 +1035,11 @@ class Bot:
             sock.emit("game:chat-public:msg", {"msg": message})
         except Exception:  # noqa: BLE001
             pass
+
+
+def _day_key_now() -> str:
+    """The local day, used for the once-a-day claim marker."""
+    return time.strftime("%Y-%m-%d")
 
 
 def _parse_ban_until(value: str) -> float:

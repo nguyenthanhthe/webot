@@ -280,6 +280,40 @@ class MaybeChatTest(unittest.TestCase):
         self.assertEqual(sent, [])
 
 
+class DailyClaimMarkerTest(unittest.TestCase):
+    def _bot(self) -> Bot:
+        return shell(store=StatusStore())
+
+    def test_the_marker_roundtrips_through_the_state_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(config_module, "STATE_DIR", Path(tmp)):
+                bot = self._bot()
+                self.assertFalse(bot._daily_claim_attempted("TALISMAN"))
+                bot._note_daily_claim_attempt("TALISMAN")
+                again = self._bot()
+                self.assertTrue(again._daily_claim_attempted("TALISMAN"))
+                # A different rung on the same day is a different mark.
+                self.assertFalse(again._daily_claim_attempted("GOLD"))
+
+    def test_a_claimed_rung_is_not_posted_twice(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(config_module, "STATE_DIR", Path(tmp)):
+                bot = self._bot()
+                calls = []
+
+                class FakeRewards:
+                    def daily_rewards(self):
+                        return [{"type": "TALISMAN", "amount": 1}]
+
+                    def claim_daily_reward(self):
+                        calls.append(True)
+                        return {}
+
+                bot._claim_daily(FakeRewards())
+                bot._claim_daily(FakeRewards())
+                self.assertEqual(len(calls), 1)
+
+
 class ProjectionTest(unittest.TestCase):
     def test_rate_and_hours_to_next_level(self) -> None:
         bot = shell(store=StatusStore())
