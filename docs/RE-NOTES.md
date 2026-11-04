@@ -168,6 +168,25 @@ window).  The full payload is ~660 characters and ends at
 counter has no data source in the observed protocol; the dashboard
 does not show one.
 
+### The room list, measured live (2026-11-05, ~05:00 UTC+7)
+
+One entry of `GET {game}/api/public/game/custom?language=XX` carries:
+`gameId, name, language, roles[] (the deal the room will draw),
+hostName, hasPassword, nightDurationInMs, dayDiscussionDurationInMs,
+dayVotingDurationInMs, voiceEnabled, regularXp, playerCount,
+pinnedMessage, customRandomRoles[]`.
+
+* **`regularXp` is a boolean flag**, not a number - "true" means the
+  room pays the normal XP rate.  The room pick prefers rooms where it
+  is true, which is the right semantics.
+* The **language parameter scopes the regional room set** (surveyed
+  en/vi/id/tr/de/es/fr/pt/ru/th + the asia host): the vill-win rooms
+  live in the **EN set**; the ASIA host was completely empty; each
+  other language had at most one regional room at night.
+* **The night lull is real scarcity, not a bug**: at ~05:00 the whole
+  EN set held one 8-player vill-win room, which the bot joined the
+  moment its poll saw it.
+
 ### Client -> server
 
 | Event | Payload |

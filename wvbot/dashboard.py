@@ -211,6 +211,8 @@ class _Handler(BaseHTTPRequestHandler):
     control: Any = None  # type: ignore[assignment]
     # Called with the requested reward action.
     reward: Any = None  # type: ignore[assignment]
+    # Called with (language, host) for the raw room list of a region.
+    rooms: Any = None  # type: ignore[assignment]
 
     def log_message(self, fmt: str, *args: Any) -> None:  # silence access log
         log.debug("dashboard %s", fmt % args)
@@ -289,6 +291,28 @@ class _Handler(BaseHTTPRequestHandler):
                             pass
             body = json.dumps(self.store.events(limit), indent=2).encode()
             self._send(200, body, "application/json")
+        elif self.path.startswith("/api/rooms"):
+            # The raw room list of a region, fetched with the bot's own
+            # authenticated client: the laptop has no valid attestation
+            # of its own.
+            language = "en"
+            host = ""
+            if "?" in self.path:
+                for part in self.path.split("?", 1)[1].split("&"):
+                    if part.startswith("language="):
+                        language = part[9:] or "en"
+                    elif part.startswith("host="):
+                        host = part[5:]
+            result: dict[str, Any] = {}
+            if self.rooms is None:
+                result = {"error": "no room probe"}
+            else:
+                try:
+                    result = {"rooms": self.rooms(language, host)}
+                except Exception as exc:  # noqa: BLE001 - report, do not crash
+                    result = {"error": str(exc)}
+            body = json.dumps(result, indent=2).encode()
+            self._send(200, body, "application/json")
         elif self.path in ("/", "/index.html"):
             self._send(200, PAGE.encode(), "text/html; charset=utf-8")
         else:
@@ -301,11 +325,12 @@ def start_dashboard(
     port: int = 8787,
     control: Any = None,
     reward: Any = None,
+    rooms: Any = None,
 ):
     handler = type(
         "_BoundHandler",
         (_Handler,),
-        {"store": store, "control": control, "reward": reward},
+        {"store": store, "control": control, "reward": reward, "rooms": rooms},
     )
     server = ThreadingHTTPServer((host, port), handler)
     thread = threading.Thread(target=server.serve_forever, name="dashboard", daemon=True)
