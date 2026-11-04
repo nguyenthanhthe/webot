@@ -231,10 +231,18 @@ class Bot:
 
         rooms = self.api.find_rooms(self.cfg.room_names)
         if not rooms:
-            self.log_event(
-                "lobby",
-                f"no room named {self.cfg.room_names} in language={self.cfg.language}",
-            )
+            matching = self.api.last_matching
+            locked = self.api.last_locked
+            if matching and locked == matching:
+                reason = (
+                    f"the {matching} matching room(s) all need a password - "
+                    "set allow_password_rooms and room_password in the config"
+                )
+            elif matching:
+                reason = f"{matching} room(s) match, {locked} of them need a password"
+            else:
+                reason = f"no room named {self.cfg.room_names} in language={self.cfg.language}"
+            self.log_event("lobby", reason)
             self.store.update(status="waiting for room")
             return False
 

@@ -27,6 +27,10 @@ class GameApi:
         self.cfg = cfg
         self.http = http
         self.auth_headers = dict(auth_headers or {})
+        # How many rooms matched the name in the last search, and how
+        # many of them were locked behind a password.
+        self.last_matching = 0
+        self.last_locked = 0
 
     # ------------------------------------------------------------------
     def list_custom_games(self, language: str | None = None) -> list[dict[str, Any]]:
@@ -94,6 +98,8 @@ class GameApi:
         if not tokens:
             return []
         found: list[dict[str, Any]] = []
+        self.last_matching = 0
+        self.last_locked = 0
         for room in self.list_custom_games():
             if not isinstance(room, dict):
                 continue
@@ -102,7 +108,9 @@ class GameApi:
                 continue
             if not self._matches(name, wanted, tokens):
                 continue
+            self.last_matching += 1
             if room.get("hasPassword") and not self.cfg.allow_password_rooms:
+                self.last_locked += 1
                 continue
             found.append(room)
         return found
