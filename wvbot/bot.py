@@ -459,6 +459,7 @@ class Bot:
             self._protector_action(sock)
         elif event in ("game-night-started", "game-werewolves-vote-set"):
             self.state.apply(event, payload)
+            self.store.update(phase=self.state.phase)
             # A new night clears the actions of the last one.
             if event == "game-night-started":
                 self._clear_actions()
@@ -466,6 +467,7 @@ class Bot:
             self._protector_action(sock)
         elif event == "game-day-voting-started":
             self.state.apply(event, payload)
+            self.store.update(phase=self.state.phase)
             self._clear_actions()
             self._day_vote(sock)
         elif event == "game-day-vote-set":
