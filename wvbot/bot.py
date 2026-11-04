@@ -506,10 +506,16 @@ class Bot:
         return True
 
     def _claim_double_xp(self, sock: SocketIOClient) -> None:
+        """Claim the doubler when the server offers it.
+
+        The offer carries a cooldown of its own - most games answer
+        with canClaimDoubleXp false and nothing is sent.  Whether the
+        claim really doubled the award shows in the next profile read.
+        """
         try:
             sock.emit("videoAdClaimReward", {"adId": "DOUBLE_XP", "type": "XP_DOUBLER"})
             sock.emit("game-over-double-xp")
-            self.log_event("xp", "claimed double XP")
+            self.log_event("xp", "double XP claimed - the profile read confirms it")
         except Exception as exc:  # noqa: BLE001
             self.log_event("warn", f"double XP claim failed: {exc}")
 
