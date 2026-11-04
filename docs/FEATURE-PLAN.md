@@ -146,3 +146,10 @@ value:
 * Blocking the game's automation probes (`/players/webBo...`) - the
   web payload does that, but the protocol mode never triggers it and
   hiding probes is exactly the behaviour that gets an account flagged.
+* **Leaving a game early** - it forfeits the XP the game would have
+  paid and an announced mid-game leave still counts against the
+  lobby-exit countdown.  The bot finishes every game it joins.
+* **A second account** - the dual-instance idea needs a second
+  refresh token, which only a manual browser login can produce.
+  The bot picks it up from the config when the operator provides one;
+  nothing to build here until then.
