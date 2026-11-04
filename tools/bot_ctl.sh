@@ -41,7 +41,10 @@ start_service() {
 stop_service() {
   # The runner notices the flag and ends the bot by itself.
   touch "$STOPFLAG"
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
+  # The runner SIGTERMs the bot (it announces its leave and exits)
+  # and only falls back to SIGKILL after a grace.  20s covers the
+  # leave emit, the socket close and the clean shutdown.
+  for _ in $(seq 1 20); do
     [ -d "$LOCK" ] || break
     sleep 1
   done
