@@ -566,11 +566,14 @@ class Bot:
         kind = str(open_ones[0].get("type") or "reward")
         amount = open_ones[0].get("amount")
         try:
-            rewards.claim_daily_reward()
+            result = rewards.claim_daily_reward()
         except Exception as exc:  # noqa: BLE001
             self.log_event("warn", f"the daily reward failed: {exc}")
             return
-        self.log_event("reward", f"claimed the daily reward: {kind} x{amount}")
+        # The answer decides what gets logged: a claim the server
+        # refused must not read as a success.
+        detail = json.dumps(result)[:200] if result else "server answered nothing"
+        self.log_event("reward", f"daily reward {kind} x{amount} -> {detail}")
 
     def _spin_wheel(self, rewards: Rewards) -> None:
         conditions = rewards.golden_wheel_conditions()
