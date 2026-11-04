@@ -110,11 +110,18 @@ class Config:
     joins_per_hour: int = 12
     request_timeout_sec: float = 20.0
     max_retries: int = 3
+    # How often the account profile is read.  The profile carries the
+    # name, the level and the ban, so it is worth a look now and then.
+    profile_refresh_sec: float = 120.0
+    # How often the game is checked for a patch.
+    update_check_sec: float = 1800.0
 
     # --- rewards -------------------------------------------------------
     # The daily reward is free, so it is claimed by default.  The
     # golden wheel costs roses, so it stays off until asked for.
     claim_daily_rewards: bool = True
+    # A loot box holds gold, XP or a role card, so it is opened.
+    open_loot_boxes: bool = True
     spin_golden_wheel: bool = False
     # How many roses the wheel may cost before the bot refuses to spin.
     wheel_max_roses: int = 100

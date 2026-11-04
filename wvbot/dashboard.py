@@ -52,6 +52,8 @@ class StatusStore:
             "projection": {},
             # The XP of today and of all time, kept across restarts.
             "history": {},
+            # The build of the game, to notice a patch.
+            "update": {},
             # The level of every player in the room.
             "levels": [],
             "started_at": time.time(),
@@ -116,7 +118,8 @@ PAGE = """<!doctype html>
    <button onclick="ctl('resume')">Resume</button>
    <button onclick="ctl('restart')">Restart game</button>
    <button onclick="reward('daily')">Claim daily reward</button>
-   <button onclick="reward('wheel')">Spin the golden wheel</button></p>
+   <button onclick="reward('wheel')">Spin the golden wheel</button>
+   <button onclick="reward('lootbox')">Open the loot boxes</button></p>
 <h1 style="color:#c9d1d9">Players in the room</h1>
 <table class="levels" id="levels"></table>
 <h1 style="color:#c9d1d9">Recent events</h1>

@@ -36,6 +36,7 @@ from .history import XpHistory
 from .http_client import HttpClient
 from .rewards import Rewards
 from .sio import SocketIOClient
+from .updates import UpdateWatcher
 
 log = logging.getLogger("wvbot.bot")
 
@@ -95,6 +96,11 @@ class Bot:
         self._acted_keys: set[str] = set()
         # The XP counters survive a restart.
         self.history = XpHistory(state_path(cfg.state_file.replace(".json", "_history.json")))
+        # When the profile was read the last time.
+        self._last_profile_read = 0.0
+        # Watches the game for a patch that could break the protocol.
+        self.updates = UpdateWatcher(cfg, self.http, self.auth.auth_headers())
+        self._last_update_check = 0.0
 
     # ------------------------------------------------------------------
     def _load_device_id(self) -> str:
@@ -172,12 +178,14 @@ class Bot:
     def _reward(self, action: str) -> bool:
         """Handle a reward action from the dashboard."""
         action = action.strip().lower()
-        if action not in ("daily", "wheel"):
+        if action not in ("daily", "wheel", "lootbox"):
             return False
         try:
             rewards = Rewards(self.cfg, self.http, self.auth.auth_headers())
             if action == "daily":
                 self._claim_daily(rewards)
+            elif action == "lootbox":
+                self._open_loot_boxes(rewards)
             else:
                 self._spin_wheel(rewards)
         except Exception as exc:  # noqa: BLE001
@@ -206,6 +214,12 @@ class Bot:
             self.log_event("error", f"initial auth failed: {exc}")
 
         while not self.stop_event.is_set():
+            # The profile is read from time to time, also while the bot
+            # waits for a room: the account can be renamed and a new
+            # ban can appear at any moment.
+            self._refresh_profile()
+            self._check_updates()
+
             # The server bans players that join too often.  Waiting it out
             # is the only way back in.
             wait = self._banned_until - time.time()
@@ -500,8 +514,29 @@ class Bot:
                 self._claim_daily(rewards)
             if self.cfg.spin_golden_wheel:
                 self._spin_wheel(rewards)
+            self._open_loot_boxes(rewards)
         except Exception as exc:  # noqa: BLE001 - a reward must not stop the bot
             self.log_event("warn", f"the rewards failed: {exc}")
+
+    def _open_loot_boxes(self, rewards: Rewards) -> None:
+        """Open the loot boxes the game left behind.
+
+        A loot box holds gold, XP or a role card, so it is worth
+        opening as soon as it shows up in the inventory.
+        """
+        try:
+            count = rewards.loot_box_count()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("could not count the loot boxes: %s", exc)
+            return
+        if count <= 0:
+            return
+        try:
+            items = rewards.open_loot_boxes()
+        except Exception as exc:  # noqa: BLE001
+            self.log_event("warn", f"the loot boxes did not open: {exc}")
+            return
+        self.log_event("reward", f"opened {count} loot box(es): {json.dumps(items)[:200]}")
 
     def _claim_daily(self, rewards: Rewards) -> None:
         ladder = rewards.daily_rewards()
@@ -610,6 +645,51 @@ class Bot:
                 log.info("own player id: %s", player.id)
                 return
 
+    def _check_updates(self) -> None:
+        """Notice a game patch.
+
+        The reference bot promises to keep working after a patch.  The
+        protocol here is re-implemented in this repository, so a patch
+        means the official client changed and the notes have to be
+        read again.  The bot only reports it.
+        """
+        now = time.time()
+        if now - self._last_update_check < self.cfg.update_check_sec:
+            return
+        self._last_update_check = now
+        try:
+            result = self.updates.check()
+        except Exception as exc:  # noqa: BLE001 - advisory only
+            log.debug("the update check failed: %s", exc)
+            return
+        self.store.update(update=result)
+        if result.get("build_changed"):
+            self.log_event(
+                "warn",
+                "the game was patched: build "
+                f"{result.get('previous_build')} -> {result.get('build_number')}",
+            )
+        if result.get("bundle_changed"):
+            self.log_event(
+                "warn",
+                "the client bundle changed: "
+                f"{result.get('previous_bundle')} -> {result.get('bundle_hash')}",
+            )
+
+    def _refresh_profile(self) -> None:
+        """Read the profile now and then.
+
+        The profile carries the name, the level and the ban, and it is
+        the only way to notice a rename while the bot is waiting for a
+        room.  It is not read on every loop, that would be a request
+        every second.
+        """
+        now = time.time()
+        if now - self._last_profile_read < self.cfg.profile_refresh_sec:
+            return
+        self._last_profile_read = now
+        self._read_profile()
+
     def _read_profile(self) -> None:
         """Read the account profile.
 
@@ -625,8 +705,14 @@ class Bot:
         if not profile:
             return
         stats = self.store.get()
+        username = profile.get("username")
+        # The account can be renamed at any time.  The bot follows the
+        # new name instead of playing under the old one.
+        previous = stats.get("username")
+        if previous and username and previous != username:
+            self.log_event("bot", f"the account was renamed: {previous} -> {username}")
         self.store.update(
-            username=profile.get("username"),
+            username=username,
             level=profile.get("level"),
             account_xp=profile.get("xpTotal"),
             games_finished=profile.get("finishedGamesCount"),

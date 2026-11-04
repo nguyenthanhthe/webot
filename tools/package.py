@@ -32,6 +32,7 @@ MEMBERS = [
     (ROOT / "wvbot" / "netfix.py", "wvbot/netfix.py"),
     (ROOT / "wvbot" / "rewards.py", "wvbot/rewards.py"),
     (ROOT / "wvbot" / "sio.py", "wvbot/sio.py"),
+    (ROOT / "wvbot" / "updates.py", "wvbot/updates.py"),
     (ROOT / "wvbot" / "ws.py", "wvbot/ws.py"),
     (ROOT / "wvbot" / "webbot.py", "wvbot/webbot.py"),
     (ROOT / "run.py", "run.py"),

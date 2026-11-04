@@ -88,6 +88,23 @@ class Rewards:
         return data if isinstance(data, dict) else {}
 
     # ------------------------------------------------------------------
+    def inventory(self) -> dict[str, Any]:
+        """The inventory: gold, roses, the loot boxes and the boosters."""
+        data = self.http.request(
+            "GET",
+            f"{CORE_URL}/inventory",
+            headers=self.auth_headers,
+        )
+        return data if isinstance(data, dict) else {}
+
+    def loot_box_count(self) -> int:
+        """How many loot boxes are waiting to be opened."""
+        inventory = self.inventory()
+        boxes = inventory.get("lootBoxes")
+        if isinstance(boxes, list):
+            return len(boxes)
+        return 0
+
     def open_loot_boxes(self) -> list[Any]:
         """Open every loot box in the inventory."""
         data = self.http.request(
@@ -100,6 +117,14 @@ class Rewards:
             if isinstance(items, list):
                 return items
         return []
+
+    def xp_boosters(self) -> list[dict[str, Any]]:
+        """The XP boosters in the inventory and how many are left."""
+        inventory = self.inventory()
+        boosters = inventory.get("ownedActivatableXpBoosters")
+        if not isinstance(boosters, list):
+            return []
+        return [b for b in boosters if isinstance(b, dict) and int(b.get("count") or 0) > 0]
 
     # ------------------------------------------------------------------
     def describe_daily(self) -> str:
