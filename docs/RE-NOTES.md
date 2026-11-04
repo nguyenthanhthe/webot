@@ -69,18 +69,61 @@ Rules that were derived:
    handles Cloudflare, the Turnstile widget and the login, and the bot
    logic runs inside the page.
 
+### What changed later
+
+The rule above is only needed for the **login**.  Once a
+`refreshToken` is in hand, the whole bot runs without a browser:
+
+| Call | From Termux Python | Note |
+|---|---|---|
+| `POST /players/createIdToken` | **works** | no attestation, mints an idToken |
+| `GET /api/public/game/custom` | **works** | the open room list |
+| socket.io handshake (game socket) | **works** | no `Cf-JWT` needed |
+
+The `Cf-JWT` is only required by the **sign-in** endpoint (and the
+official client refreshes it every 10 minutes for the REST calls it
+makes from the page).  The socket handshake does without it.
+
+So the practical split is:
+
+* **once**, in a real browser on the laptop: log in and grab the
+  `refreshToken` (`web/login.mjs` does this),
+* **forever**, on the phone: pure Python, no browser, no screen, no
+  clicking.
+
 ## 5. Socket.io protocol
 
 Engine.IO v4 / socket.io v4, websocket-only, path `/socket.io/`.
 
+### The game socket (custom games)
+
+A custom game is entered **directly** - there is no lobby step.  The
+game socket is opened with the game id and the mode in the query and the
+firebase token in the handshake auth:
+
 ```
-query = {firebaseToken, gameId, ids: 1, apiV: 1, EIO: 4, reconnect: "true", "Cf-JWT": ...}
+query = {gameId, gameMode: "custom", reconnect: "true", ids: 1, apiV: 1, deviceId}
 auth  = {firebaseToken}
 transports = ["websocket"]
 ```
 
-The game id and the game server URL arrive with `game-joined`; the values
-of that payload are `[gameId, serverUrl]`.
+This was verified live from the phone: the server accepted the handshake
+and answered with a game event, so the auth chain works without a
+browser and without a `Cf-JWT`.
+
+### The lobby socket (quick games)
+
+The official client also opens a lobby socket on the same host:
+
+```
+query = {ids: 1, apiV: 1, b: <random 42..99>}
+auth  = {firebaseToken}
+```
+
+It carries the quick-game events (`mg:games-open`, `mg:game-running`,
+`lobby:chat-msg:`, `player-joined-and-equipped-items`, ...).  The
+`mg:join-open-game` event belongs to this socket, **not** to the custom
+games - custom games are joined through the game socket above.
 
 ### Server -> client
 
@@ -97,14 +140,15 @@ of that payload are `[gameId, serverUrl]`.
 | `game:chat-public:msg` / `game:chat-werewolves:msg` | `{authorId, msg}` |
 | `game-reconnect-set-players` | `{playerId: {isAlive, ...}}` |
 | `game-over-awards-available` | `{playerAward: {awardedTotalXp, awardedLevels, canClaimDoubleXp}}` |
+| `error-user-banned` | `{bannedUntilTime, banReason, banReasonMsg}` |
 
 ### Client -> server
 
 | Event | Payload |
 |---|---|
-| `mg:join-open-game` | `{miniGameId}` (lobby socket) |
+| `mg:join-open-game` | `{miniGameId}` (lobby socket, quick games) |
 | `game-day-vote-set` | **JSON string** `{targetPlayerId}` |
-| `game-vote-to-skip` | - |
+| `game-vote-to-skip` | **JSON string** `{}` |
 | `game-werewolves-vote-set` | **JSON string** `{targetPlayerId}` |
 | `game-priest-kill-player` / `game-vigilante-shoot` / `game-gunner-shoot-player` | **JSON string** `{targetPlayerId}` |
 | `game-junior-werewolf-selected-player` | **JSON string** `{targetPlayerId}` |
@@ -115,6 +159,37 @@ of that payload are `[gameId, serverUrl]`.
 > Every game action is sent as a **JSON string** - only the ad reward
 > event takes a plain object.  This is what the official client does and
 > the server expects.
+
+### The room list and the room names
+
+`GET {game}/api/public/game/custom?language=en` returns the open rooms:
+
+```json
+{"openGames": [{"gameId": "f6c917e0-...", "name": "🏆 24HR VILL WIN NT (E) 🏆",
+                "playerCount": 8, "hasPassword": false, ...}]}
+```
+
+The field is **`gameId`** here, while the quick-game socket uses `id`.
+
+The room names are set by the players and use all kinds of characters:
+`E  VİLL WİN` (Turkish dotted I), `E - VILLAGE WIN - NT -TF`,
+`🏆 24HR VILL WIN NT (E) 🏆`.  Matching therefore has to fold the name to
+plain ASCII (NFD, drop the combining marks, map `İ`/`ı`) before
+comparing.
+
+### Banning
+
+The server bans accounts that join too often or that leave a lobby during
+the countdown:
+
+```
+error-user-banned {"bannedUntilTime": "2026-11-04T15:12:02.176Z",
+                   "banReason": "LOBBY_EXIT_COUNTDOWN",
+                   "banReasonMsg": "Please wait a bit before rejoining a match."}
+```
+
+The bot has to wait the ban out and must not touch the server before
+`bannedUntilTime` - joining again during the ban makes it longer.
 
 ### Role metadata
 

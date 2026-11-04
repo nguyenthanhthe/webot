@@ -3,42 +3,51 @@
 A bot that plays Wolvesville custom games ("vill win" rooms) on its own,
 24/7, headless - and a dashboard that shows what it is doing.
 
-The idea: the **browser** does what only a browser can do (Cloudflare,
-the Turnstile widget, the login), and a small injected script does the
-**game** over socket.io.  No clicking, no screen, no coordinates.
+The bot speaks to the game server **directly**: it mints its own firebase
+token from a refresh token, lists the open rooms over REST and plays over
+socket.io.  No browser, no screen, no clicking - just the Python standard
+library, so it runs happily inside Termux on a phone.
 
 ```
-┌──────────────┐   socket.io    ┌──────────────────────┐
-│ injected     │───────────────▶│ game.api-wolvesville │
-│ payload.js   │◀───────────────│                      │
-└──────┬───────┘                └──────────────────────┘
+┌──────────────┐   REST + socket.io   ┌──────────────────────┐
+│ wvbot        │─────────────────────▶│ game.api-wolvesville │
+│ (python)     │◀─────────────────────│                      │
+└──────┬───────┘                      └──────────────────────┘
        │ state / events
        ▼
-┌──────────────┐                ┌──────────────────────┐
-│ supervisor   │                │ dashboard :8787      │
-│ (python/ node)│───────────────▶│ (laptop browser)     │
-└──────────────┘                └──────────────────────┘
+┌──────────────┐                      ┌──────────────────────┐
+│ dashboard    │─────────────────────▶│ laptop browser       │
+│ :8787        │                      │ (adb forward)        │
+└──────────────┘                      └──────────────────────┘
 ```
 
-## Two hosts, one payload
+## The one thing that needs a browser
 
-| Host | Runner | Use it for |
-|---|---|---|
-| **Android (mini PC)** | `wvbot/webbot.py` - Termux + headless Firefox + Marionette | the 24/7 bot, screen off, phone plugged in |
-| **Laptop / Docker** | `web/bot.mjs` - Playwright + Chromium | development, debugging, or a server of its own |
+Only the **first login**.  The sign-in endpoint wants a Cloudflare
+attestation that only a real browser can produce.  Once you have logged
+in once, the `refreshToken` is the durable credential: it mints new
+idTokens for as long as it lives, and nothing else needs a browser.
 
-Both inject the same `web/payload.js`, so the behaviour is identical.
+```bash
+cd web
+npm install
+node login.mjs            # opens a visible browser - you log in there
+```
+
+`login.mjs` stores the session in `web/state/` and prints the refresh
+token.  Copy it to the phone (see below); from then on the phone runs
+completely on its own.
 
 ## Run it on the phone (the mini PC)
 
 ```bash
 # on the phone, inside Termux
-python3 ~/wv-bot/setcreds.py     # once: store email + password, restart the bot
-python3 ~/wv-bot/run.py           # the bot (web mode, the default)
+sh ~/deploy.sh             # unpack the package, store the refresh token
+sh ~/bot_start.sh          # start the bot in the background
 ```
 
-* The bot starts itself after every reboot (`Termux:Boot`) and after every
-  Termux session start, and it keeps the CPU awake (`termux-wake-lock`).
+* The bot keeps the CPU awake (`termux-wake-lock`) and starts itself
+  after every reboot (`Termux:Boot`).
 * The dashboard is on port 8787 of the phone.  From the laptop:
 
 ```bash
@@ -62,34 +71,44 @@ the phone and the last events.  The same numbers are on the dashboard.
 | `errors` / `reconnects` | both should stay flat while things are fine |
 | `uptime_sec` | how long the current session has been running |
 | `xp_total` / `games_played` | the harvest |
+| `banned` | the server banned the account; the bot waits the ban out |
 
-## Run it on the laptop
+## The other host: a browser
+
+The original design drove the official web client in a headless Firefox
+and injected a script into the page.  That still exists and is useful
+when the protocol mode runs into a Cloudflare challenge:
 
 ```bash
 cd web
 npm install && npx playwright install chromium
 node bot.mjs --login     # log in once in a visible browser
 node bot.mjs             # run headless
+node bot.mjs --headed    # run with a visible browser (debugging)
 ```
 
-Docker: see `web/Dockerfile` (the payload and the config are the same).
+Both runners inject the same `web/payload.js`, so the behaviour is
+identical.
 
 ## Layout
 
 ```
 wv-bot/
-  run.py            launcher for the phone (web mode by default)
+  run.py            launcher for the phone (protocol mode by default)
   setcreds.py       stores the account credentials on the device (mode 600)
   config.json       template (the real one lives in ~/.wv-bot/)
-  wvbot/            python side: supervisor, marionette, firefox, dashboard, legacy protocol bot
+  wvbot/            python side: supervisor, socket.io client, api, dashboard
   web/              node side: playwright runner + the shared payload
-  tools/            packaging, probes and the status helper
+  tools/            packaging, deployment, probes and the status helper
   docs/RE-NOTES.md  everything that was learned about the protocol
 ```
 
-## Legacy: the pure protocol bot
+## The two modes
 
-`python3 run.py --mode protocol` runs the original socket.io client that
-speaks to the API directly.  It needs a valid `refreshToken` and a
-`Cf-JWT` for the first sign-in, which is why the browser is the primary
-path.  It is kept as a fallback for a machine that already has a token.
+| Mode | Command | Needs |
+|---|---|---|
+| protocol | `python3 run.py` (default) | a refresh token |
+| web | `python3 run.py --mode web` | a browser (headless Firefox on the phone) |
+
+The protocol mode is the default because it needs nothing but the Python
+standard library.
