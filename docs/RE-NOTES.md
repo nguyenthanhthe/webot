@@ -158,8 +158,14 @@ in the config turns them back on, `room_password` sends the password).
 | `game-day-vote-set` | `{targetPlayerId, playerId}` |
 | `game:chat-public:msg` / `game:chat-werewolves:msg` | `{authorId, msg}` |
 | `game-reconnect-set-players` | `{playerId: {isAlive, ...}}` |
-| `game-over-awards-available` | `{playerAward: {awardedTotalXp, awardedLevels, canClaimDoubleXp}}` |
+| `game-over-awards-available` | `{playerAward: {awardedTotalXp, awardedLevels, awardedXp: [{reason: GAME_FINISHED|CONSECUTIVE_GAMES, xp, clanQuestXp, battlePassXp}], awardedInventoryRewards, awardedLootBoxes, canClaimDoubleXp, battlePassRewards, ...}}` |
 | `error-user-banned` | `{bannedUntilTime, banReason, banReasonMsg}` |
+
+The `awardedXp` reasons seen live: `GAME_FINISHED` (the base pay) and
+`CONSECUTIVE_GAMES` (a streak bonus for playing back to back within a
+window).  A **win flag has no ground truth yet** - the payload tail
+beyond the log cut is still unseen; the bot logs 1600 characters of
+the payload per game to finish the survey.
 
 ### Client -> server
 
