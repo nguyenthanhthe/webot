@@ -23,6 +23,7 @@ from typing import Any
 from .config import Config, load_config, state_path
 from .dashboard import StatusStore, start_dashboard
 from .firefox import launch_headless, stop, wait_for_marionette
+from .http_client import HttpClient
 from .marionette import Marionette
 
 log = logging.getLogger("wvbot.webbot")
@@ -63,19 +64,40 @@ el.dispatchEvent(new Event('change', {bubbles: true}));
 return true;
 """
 
-# Click the first element whose text matches one of the patterns.
+# Click the innermost element whose text matches one of the patterns.
 CLICK_TEXT_JS = """
 var patterns = arguments[0];
 var re = new RegExp(patterns.join('|'), 'i');
-var nodes = Array.from(document.querySelectorAll('button, a, div, span, label'));
-for (var i = nodes.length - 1; i >= 0; i--) {
-  var node = nodes[i];
-  if (re.test((node.innerText || '').trim())) {
-    node.click();
-    return true;
-  }
-}
-return false;
+var nodes = Array.from(document.querySelectorAll(
+    'button, a, div, span, label, input[type=submit], [role=button]'));
+var matches = nodes.filter(function (node) {
+  var label = (node.innerText || node.value || '') + ' ' + (node.getAttribute('aria-label') || '');
+  return re.test(label.trim());
+});
+var deepest = matches.filter(function (node) {
+  return !matches.some(function (other) {
+    return other !== node && node.contains(other);
+  });
+});
+if (!deepest.length) return false;
+deepest[0].click();
+return true;
+"""
+
+# A snapshot of the page, used to report why a login step did not work.
+PAGE_STATE_JS = """
+return {
+  url: location.href,
+  inputs: Array.from(document.querySelectorAll('input')).map(function (i) {
+    return {type: i.type, name: i.name, id: i.id,
+            placeholder: i.placeholder, value: i.value ? '***' : ''};
+  }),
+  buttons: Array.from(document.querySelectorAll('button, [role=button], a'))
+    .map(function (b) { return (b.innerText || '').trim(); })
+    .filter(function (t) { return t.length; })
+    .slice(0, 25),
+  text: (document.body.innerText || '').replace(/\\s+/g, ' ').slice(0, 700)
+};
 """
 
 HAS_SESSION_JS = """
@@ -85,6 +107,23 @@ for (var i = 0; i < Object.keys(window.localStorage).length; i++) {
   if (raw && (raw.indexOf('idToken') !== -1 || raw.indexOf('accessToken') !== -1)) return true;
 }
 return false;
+"""
+
+# Plant the session into the page so the official client believes it is
+# logged in.  The client then refreshes the token and the Cloudflare
+# attestation on its own, and the injected payload picks both up.
+SEED_SESSION_JS = """
+var tokens = arguments[0];
+if (!tokens || !tokens.idToken) return false;
+try {
+  window.localStorage.setItem('authtokens', JSON.stringify({
+    idToken: tokens.idToken,
+    refreshToken: tokens.refreshToken || null
+  }));
+  return true;
+} catch (err) {
+  return false;
+}
 """
 
 PAYLOAD_ALIVE_JS = "return Boolean(window.__wvbotBot && window.__wvbotBot.alive);"
@@ -120,13 +159,41 @@ class WebBot:
     def _config_js(self) -> str:
         settings = {
             "gameHost": "https://game.api-wolvesville.com",
+            "authHost": "https://auth.api-wolvesville.com",
+            "refreshToken": self.cfg.refresh_token or None,
             "roomNames": self.cfg.room_names,
             "language": self.cfg.language,
             "gameMode": self.cfg.game_mode,
             "claimDoubleXp": self.cfg.claim_double_xp,
-            "reportUrl": f"http://127.0.0.1:{self.cfg.dashboard_port}/report",
         }
         return f"window.__WV_CONFIG = {json.dumps(settings)};"
+
+    # ------------------------------------------------------------------
+    def _mint_id_token(self) -> str:
+        """Mint an idToken from the refreshToken.
+
+        The refresh path needs no Cloudflare attestation, so it works
+        without a browser.  The idToken is good for an hour.
+        """
+        if not self.cfg.refresh_token:
+            raise RuntimeError("no refresh token configured")
+        client = HttpClient()
+        data = client.request(
+            "POST",
+            "https://auth.api-wolesville.com/players/createIdToken",
+            body={"refreshToken": self.cfg.refresh_token},
+        )
+        token = (data or {}).get("idToken")
+        if not token:
+            raise RuntimeError("createIdToken returned no idToken")
+        return token
+
+    def _seed_session(self, client: Marionette) -> bool:
+        """Put a fresh session into the page."""
+        token = self._mint_id_token()
+        ok = bool(client.execute_script(SEED_SESSION_JS, [{"idToken": token, "refreshToken": self.cfg.refresh_token}]))
+        self.log_event("login", f"session seeded (token length {len(token)})")
+        return ok
 
     # ------------------------------------------------------------------
     def _click_text(self, client: Marionette, patterns: list[str]) -> bool:
@@ -169,21 +236,54 @@ class WebBot:
         """Make sure the page has a session; returns True when it does."""
         if client.execute_script(HAS_SESSION_JS):
             return True
+
+        # A refreshToken is enough: it mints idTokens without a browser.
+        if self.cfg.refresh_token:
+            try:
+                if self._seed_session(client):
+                    time.sleep(2)
+                    if client.execute_script(HAS_SESSION_JS):
+                        return True
+            except Exception as exc:  # noqa: BLE001 - network hiccup
+                self.log_event("warn", f"session seeding failed: {exc}")
+                return False
+
         if not (self.cfg.email and self.cfg.password):
             self.log_event("login", "no session yet - log in once in the browser")
             return False
 
         self.log_event("login", "logging in with the configured account")
-        self._click_text(client, ["Accept", "Đồng ý", "START GAME OK", "I agree"])
+
+        # 1. the consent screen (age + terms) has to be accepted first
+        self._click_text(client, ["I am 16", "I have read", "16 years", "agree"])
+        time.sleep(1)
+        self._click_text(client, ["Accept", "Đồng ý", "OK", "START GAME OK"])
         time.sleep(2)
-        self._click_text(client, ["Log in", "Log In", "Sign in", "Đăng nhập", "Login"])
+
+        # 2. open the login form
+        opened = self._click_text(
+            client, ["Log in", "Log In", "Login", "Sign in", "Sign In", "Đăng nhập"]
+        )
+        self.log_event("login", f"login form {'opened' if opened else 'not found'}")
         time.sleep(3)
 
-        client.execute_script(FILL_JS, ["email", self.cfg.email])
-        client.execute_script(FILL_JS, ["password", self.cfg.password])
+        # 3. fill the form
+        filled_email = client.execute_script(FILL_JS, ["email", self.cfg.email])
+        filled_password = client.execute_script(FILL_JS, ["password", self.cfg.password])
+        self.log_event(
+            "login", f"form filled (email={filled_email}, password={filled_password})"
+        )
         time.sleep(1)
-        self._solve_turnstile(client)
-        self._click_text(client, ["Log in", "Log In", "Sign in", "Continue", "Tiếp tục"])
+
+        # 4. the Turnstile checkbox, if it is visible
+        if self._solve_turnstile(client):
+            self.log_event("login", "turnstile solved")
+            time.sleep(2)
+
+        # 5. submit
+        self._click_text(
+            client, ["Log in", "Log In", "Login", "Sign in", "Continue", "Tiếp tục"]
+        )
 
         deadline = time.time() + self.cfg.request_timeout_sec * 3
         while time.time() < deadline:
@@ -191,7 +291,9 @@ class WebBot:
                 self.log_event("login", "login succeeded")
                 return True
             time.sleep(2)
-        self.log_event("warn", "login did not complete")
+
+        state = client.execute_script(PAGE_STATE_JS)
+        self.log_event("warn", f"login did not complete; page: {json.dumps(state)[:600]}")
         return False
 
     # ------------------------------------------------------------------
@@ -213,7 +315,9 @@ class WebBot:
         self.client.navigate(GAME_URL)
         time.sleep(6)
 
-        self._login(self.client)
+        if not self._login(self.client):
+            # A failed login is retried by the supervisor (new browser).
+            raise RuntimeError("login failed")
         self._inject(self.client)
         self.store.update(status="playing", last_error=None)
         self.log_event("bot", "bot is running")

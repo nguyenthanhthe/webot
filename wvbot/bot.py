@@ -31,7 +31,7 @@ from .api import GameApi
 from .auth import AuthManager
 from .config import Config, state_path
 from .dashboard import StatusStore, start_dashboard
-from .game import GameState, Policy
+from .game import GameState, Policy, parse_payload
 from .http_client import HttpClient
 from .sio import SocketIOClient
 
@@ -62,6 +62,9 @@ class Bot:
         self.stop_event = threading.Event()
         self._backoff = cfg.reconnect_delay_sec
         self._failures = 0
+        # Set when the server bans us; the run loop waits it out.
+        self._banned_until = 0.0
+        self._banned = threading.Event()
 
     # ------------------------------------------------------------------
     def _load_device_id(self) -> str:
@@ -95,12 +98,27 @@ class Bot:
             self.log_event("error", f"initial auth failed: {exc}")
 
         while not self.stop_event.is_set():
+            # The server bans players that join too often.  Waiting it out
+            # is the only way back in.
+            wait = self._banned_until - time.time()
+            if wait > 0:
+                self.log_event("warn", f"banned for another {int(wait)}s")
+                self.store.update(status="banned")
+                self.stop_event.wait(min(wait + 5, 7200))
+                if self.stop_event.is_set():
+                    break
+                self._banned_until = 0.0
+            self._banned.clear()
+
             try:
                 played = self.session()
                 self._failures = 0
                 self._backoff = self.cfg.reconnect_delay_sec
+                # Always pause between games: joining back to back is
+                # what gets the account banned.
+                self.stop_event.wait(self.cfg.reconnect_delay_sec)
                 if not played:
-                    self.stop_event.wait(self.cfg.reconnect_delay_sec)
+                    continue
             except Exception as exc:  # noqa: BLE001 - the supervisor must not die
                 self._failures += 1
                 self.store.update(errors=self._failures, last_error=str(exc))
@@ -134,53 +152,14 @@ class Bot:
         token = self.auth.ensure_token()
         self.api.auth_headers = self.auth.auth_headers()
 
-        lobby = SocketIOClient(
-            self.cfg.game_base_url,
-            query={"ids": 1, "apiV": 1},
-            auth=self._socket_auth(token),
-            headers={"Origin": "https://app.wolvesville.com"},
-        )
-        game_info: dict[str, Any] = {}
-        joined = threading.Event()
+        # A custom game is entered directly: the game socket carries the
+        # game id and the mode, there is no lobby step in between.
+        self.state.game_id = room_id
+        self.state.server_url = self.cfg.game_base_url
+        self.log_event("game", f"game {room_id} on {self.cfg.game_base_url}")
+        self.store.update(status="in game", game_id=str(room_id))
 
-        def on_games_open(data: Any) -> None:
-            log.debug("mg:games-open %s", str(data)[:200])
-
-        def on_running_game(data: Any) -> None:
-            info = _extract_game_info(data)
-            if info:
-                game_info.update(info)
-                joined.set()
-
-        def on_game_joined(data: Any) -> None:
-            info = _extract_game_info(data)
-            if info:
-                game_info.update(info)
-                joined.set()
-
-        lobby.on("mg:games-open", on_games_open)
-        lobby.on("mg:running-game", on_running_game)
-        lobby.on("game-joined", on_game_joined)
-        lobby.on("mg:game-running", on_running_game)
-
-        try:
-            lobby.start()
-            lobby.emit("mg:join-open-game", {"miniGameId": room_id})
-
-            if not joined.wait(timeout=30.0):
-                self.log_event("lobby", "no game-joined within 30s; will retry")
-                return False
-
-            game_id = game_info.get("gameId")
-            server_url = game_info.get("serverUrl") or self.cfg.game_base_url
-            self.state.game_id = game_id
-            self.state.server_url = server_url
-            self.log_event("game", f"game {game_id} on {server_url}")
-            self.store.update(status="in game", game_id=str(game_id))
-
-            return self._play_game(token, game_id, server_url)
-        finally:
-            lobby.close()
+        return self._play_game(token, room_id, self.cfg.game_base_url)
 
     # ------------------------------------------------------------------
     def _socket_auth(self, token: str) -> dict[str, str]:
@@ -190,15 +169,16 @@ class Bot:
         return auth
 
     def _play_game(self, token: str, game_id: Any, server_url: str) -> bool:
+        # The official client puts the firebase token in the handshake
+        # auth and the game id in the query.
         sock = SocketIOClient(
             server_url,
             query={
-                "firebaseToken": token,
                 "gameId": game_id,
-                "reconnect": "true",
                 "gameMode": self.cfg.game_mode,
-                "randomAvatarSlot": "false",
-                "dodgeBlockedPlayers": "false",
+                "reconnect": "true",
+                "ids": 1,
+                "apiV": 1,
                 "deviceId": self.device_id,
             },
             auth=self._socket_auth(token),
@@ -221,7 +201,11 @@ class Bot:
             return False
 
         self.store.update(status="playing")
-        finished.wait()
+        # Stop as soon as the server bans us: touching it again would
+        # only make the ban longer.
+        while not finished.wait(timeout=1.0):
+            if self._banned.is_set():
+                break
         sock.close()
 
         award = self.state.last_award
@@ -282,10 +266,30 @@ class Bot:
         elif event == "game-over-awards-available":
             self.state.apply(event, payload)
             self.store.update(phase="game-over")
+        elif event == "error-user-banned":
+            # The server bans players that join too often or leave a
+            # lobby during the countdown.  The bot has to wait it out.
+            data = parse_payload(payload)
+            reason = ""
+            until = ""
+            if isinstance(data, dict):
+                reason = str(data.get("banReasonMsg") or data.get("banReason") or "")
+                until = str(data.get("bannedUntilTime") or "")
+            self._banned_until = _parse_ban_until(until)
+            self.log_event(
+                "warn",
+                f"banned by the server: {reason or 'unknown reason'} "
+                f"until {until or 'unknown'}".strip(),
+            )
+            self.store.update(status="banned", last_error=reason or "banned")
+            # Do not touch the server again until the ban is over.
+            self._banned.set()
         elif event in ("game-player-left", "game-over-player-left"):
             self.log_event("game", f"{event}")
 
     # -- actions -------------------------------------------------------
+    # The official client sends every game payload as a JSON *string*;
+    # only the ad reward takes a plain object.
     def _night_action(self, sock: SocketIOClient) -> None:
         if not self.state.is_wolf:
             return
@@ -293,7 +297,7 @@ class Bot:
         if target is None:
             return
         try:
-            sock.emit("game-werewolves-vote-set", {"targetPlayerId": target})
+            sock.emit("game-werewolves-vote-set", json.dumps({"targetPlayerId": target}))
             self.log_event("action", f"werewolf vote -> {target}")
         except Exception as exc:  # noqa: BLE001
             self.log_event("warn", f"werewolf vote failed: {exc}")
@@ -302,10 +306,10 @@ class Bot:
         target = self.policy.vote_target(self.state)
         try:
             if target is None:
-                sock.emit("game-vote-to-skip")
+                sock.emit("game-vote-to-skip", json.dumps({}))
                 self.log_event("action", "day vote: skip")
             else:
-                sock.emit("game-day-vote-set", {"targetPlayerId": target})
+                sock.emit("game-day-vote-set", json.dumps({"targetPlayerId": target}))
                 self.log_event("action", f"day vote -> {target}")
         except Exception as exc:  # noqa: BLE001
             self.log_event("warn", f"day vote failed: {exc}")
@@ -321,7 +325,7 @@ class Bot:
         if target is None:
             return
         try:
-            sock.emit(event, {"targetPlayerId": target})
+            sock.emit(event, json.dumps({"targetPlayerId": target}))
             self.log_event("action", f"{event} -> {target}")
         except Exception as exc:  # noqa: BLE001
             self.log_event("warn", f"{event} failed: {exc}")
@@ -336,12 +340,27 @@ class Bot:
             pass
 
 
-def _extract_game_info(data: Any) -> dict[str, Any]:
-    """``game-joined`` carries the game id and the game server URL.
+def _parse_ban_until(value: str) -> float:
+    """Turn the server's ban timestamp into a local epoch value.
 
-    The official client reads them positionally from the object's values;
-    we accept both the named and the positional form.
+    The server sends an ISO timestamp in UTC.  A value we cannot read
+    means "no known end", and the caller then uses its own backoff.
     """
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    try:
+        from datetime import datetime, timezone
+
+        stamp = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        return stamp.timestamp()
+    except Exception:  # noqa: BLE001 - advisory only
+        return 0.0
+
+
+def _extract_game_info(data: Any) -> dict[str, Any]:
     if not isinstance(data, dict):
         return {}
     info: dict[str, Any] = {}

@@ -2,12 +2,17 @@
 
 Usage (inside Termux):
 
-    python3 run.py              # web bot: headless Firefox + injected payload
-    python3 run.py --mode protocol
+    python3 run.py               # protocol mode: pure Python over socket.io
+    python3 run.py --mode web    # headless Firefox + injected payload
 
-The web bot is the default: a headless Firefox logs in (once), then the
-injected script plays the custom games over socket.io - no clicking, no
-screen, no protocol re-implementation.
+The protocol mode is the default because it needs nothing but the Python
+standard library: it mints its own firebase token from the refresh token,
+lists the open custom games over REST and plays them over socket.io.  No
+browser, no screen, no clicking.
+
+The web mode drives the official web client in a headless Firefox and
+injects a script into it.  It is kept as a fallback for the cases where
+the protocol mode runs into a Cloudflare challenge.
 """
 
 from __future__ import annotations
@@ -40,7 +45,7 @@ def _wake_lock() -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Wolvesville bot")
-    parser.add_argument("--mode", choices=["web", "protocol"], default="web")
+    parser.add_argument("--mode", choices=["web", "protocol"], default="protocol")
     args = parser.parse_args()
 
     os.chdir(ROOT)
@@ -59,7 +64,7 @@ def main() -> int:
 
     from wvbot.__main__ import main as protocol_main
 
-    return protocol_main([])
+    return protocol_main()
 
 
 if __name__ == "__main__":

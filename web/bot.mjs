@@ -26,12 +26,46 @@ const GAME_URL = "https://www.wolvesville.com/";
 
 const argv = process.argv.slice(2);
 const LOGIN_ONLY = argv.includes("--login");
-const HEADED = argv.includes("--headed") || LOGIN_ONLY;
+const TOKENS_ONLY = argv.includes("--tokens");
+const HEADED = argv.includes("--headed") || LOGIN_ONLY || TOKENS_ONLY;
+
+const TOKENS_FILE = path.join(HERE, "state", "tokens.json");
+const PROFILE_DIR = path.join(HERE, "state", "profile");
+
+/**
+ * The tokens of the last manual login.
+ *
+ * The refreshToken is the durable credential: it can mint new idTokens
+ * forever, so the bot survives an expired session.
+ */
+function loadTokens() {
+  if (!existsSync(TOKENS_FILE)) return null;
+  try {
+    return JSON.parse(readFileSync(TOKENS_FILE, "utf-8"));
+  } catch (err) {
+    return null;
+  }
+}
+
+/** Keep the firebase tokens around: the phone runner refreshes with them. */
+function saveTokens(session) {
+  if (!session || !session.refreshToken) return null;
+  mkdirSync(STATE_DIR, { recursive: true });
+  const payload = {
+    idToken: session.idToken,
+    refreshToken: session.refreshToken,
+    savedAt: Date.now(),
+  };
+  writeFileSync(TOKENS_FILE, JSON.stringify(payload, null, 2));
+  return payload;
+}
 
 function loadConfig() {
   const defaults = {
     email: "",
     password: "",
+    // The durable credential from a manual login (state/tokens.json).
+    refresh_token: "",
     room_names: ["vill win"],
     language: "en",
     game_mode: "custom",
@@ -63,7 +97,13 @@ async function readSession(page) {
     if (raw) {
       try {
         const parsed = JSON.parse(raw);
-        if (parsed.idToken) return { source: "authtokens", idToken: parsed.idToken };
+        if (parsed.idToken) {
+          return {
+            source: "authtokens",
+            idToken: parsed.idToken,
+            refreshToken: parsed.refreshToken || null,
+          };
+        }
       } catch (err) {
         /* ignore */
       }
@@ -75,7 +115,11 @@ async function readSession(page) {
         const parsed = JSON.parse(value);
         const manager = parsed.stsTokenManager || parsed;
         if (manager.accessToken) {
-          return { source: key, idToken: manager.accessToken };
+          return {
+            source: key,
+            idToken: manager.accessToken,
+            refreshToken: manager.refreshToken || null,
+          };
         }
       } catch (err) {
         /* ignore */
@@ -107,30 +151,65 @@ async function loginInteractive(context, page, cfg, dash) {
   throw new Error("login did not complete in time");
 }
 
+/** Click the Turnstile checkbox when it shows up. */
+async function solveTurnstile(page) {
+  try {
+    const frame = page
+      .frameLocator("iframe[src*='challenges.cloudflare.com']")
+      .first();
+    const box = frame.locator("input[type=checkbox], label, .cb-lb").first();
+    await box.click({ timeout: 8000, force: true });
+    return true;
+  } catch (err) {
+    return false;
+  }
+}
+
 /** Log in with the credentials from config.json (used only if they exist). */
 async function loginWithCredentials(page, cfg, dash) {
   dash.addEvent("login", "logging in with the credentials from config.json");
   await page.goto(GAME_URL, { waitUntil: "domcontentloaded" });
-  await page.waitForTimeout(4000);
+  await page.waitForTimeout(5000);
 
-  const emailInput = page.locator('input[type="email"]').first();
-  if (await emailInput.count() === 0) {
-    const trigger = page.getByText(/log\s?in|sign\s?in|đăng nhập/i).first();
-    if (await trigger.count() > 0) {
-      await trigger.click().catch(() => {});
-      await page.waitForTimeout(2500);
+  // 1. the consent screen (age + terms)
+  for (const pattern of [/I am 16/i, /I have read/i, /agree/i]) {
+    const item = page.getByText(pattern).first();
+    if (await item.count() > 0) {
+      await item.click({ timeout: 5000, force: true }).catch(() => {});
+      await page.waitForTimeout(500);
     }
   }
+  const accept = page.getByText(/^(Accept|Đồng ý|OK|START GAME OK)$/i).first();
+  if (await accept.count() > 0) {
+    await accept.click({ timeout: 5000, force: true }).catch(() => {});
+    await page.waitForTimeout(2500);
+  }
 
+  // 2. open the login form
+  const trigger = page.getByText(/^(Log in|Log In|Login|Sign in|Sign In|Đăng nhập)$/i).first();
+  if (await trigger.count() > 0) {
+    await trigger.click({ timeout: 5000, force: true }).catch(() => {});
+    await page.waitForTimeout(2500);
+  }
+
+  // 3. fill the form
   const email = page.locator('input[type="email"]').first();
   const password = page.locator('input[type="password"]').first();
   await email.waitFor({ state: "visible", timeout: 30000 });
   await email.fill(cfg.email);
   await password.fill(cfg.password);
+
+  // 4. the Turnstile widget
+  if (await solveTurnstile(page)) {
+    dash.addEvent("login", "turnstile solved");
+    await page.waitForTimeout(2000);
+  }
+
+  // 5. submit
   await password.press("Enter").catch(() => {});
-  const submit = page.getByText(/log\s?in|sign\s?in|continue|tiếp tục/i).first();
+  const submit = page.getByText(/^(Log in|Log In|Login|Sign in|Continue|Tiếp tục)$/i).first();
   if (await submit.count() > 0) {
-    await submit.click().catch(() => {});
+    await submit.click({ timeout: 5000, force: true }).catch(() => {});
   }
 
   const deadline = Date.now() + cfg.login_timeout_sec * 1000;
@@ -164,11 +243,14 @@ async function runSession(browser, cfg, dash) {
     }
   });
 
+  const tokens = loadTokens();
   const socketIoPath = path.join(HERE, "node_modules", "socket.io-client", "dist", "socket.io.min.js");
   const payloadPath = path.join(HERE, "payload.js");
   await page.addInitScript({
     content: `window.__WV_CONFIG = ${JSON.stringify({
       gameHost: "https://game.api-wolvesville.com",
+      authHost: "https://auth.api-wolvesville.com",
+      refreshToken: (tokens && tokens.refreshToken) || cfg.refresh_token || null,
       roomNames: cfg.room_names,
       language: cfg.language,
       gameMode: cfg.game_mode,
@@ -226,10 +308,23 @@ async function runLoginOnly(browser, cfg, dash) {
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   const page = await context.newPage();
   await page.goto(GAME_URL, { waitUntil: "domcontentloaded" });
-  await loginInteractive(context, page, { ...cfg, login_timeout_sec: 900 }, dash);
+
+  let session = await readSession(page);
+  if (!session && cfg.email && cfg.password) {
+    session = await loginWithCredentials(page, cfg, dash);
+  }
+  if (!session) {
+    session = await loginInteractive(context, page, { ...cfg, login_timeout_sec: 900 }, dash);
+  }
   mkdirSync(STATE_DIR, { recursive: true });
   await context.storageState({ path: AUTH_FILE });
   dash.addEvent("login", `session saved to ${AUTH_FILE}`);
+
+  const tokens = saveTokens(session);
+  if (tokens) {
+    dash.addEvent("login", "tokens saved to state/tokens.json");
+    console.log(tokens.refreshToken);
+  }
   await context.close();
 }
 
@@ -243,12 +338,13 @@ async function main() {
     args: ["--disable-blink-features=AutomationControlled", "--no-sandbox"],
   });
 
-  if (LOGIN_ONLY) {
+  if (LOGIN_ONLY || TOKENS_ONLY) {
     try {
       await runLoginOnly(browser, cfg, dash);
     } catch (err) {
       dash.update({ status: "error", last_error: String(err && err.message) });
       dash.addEvent("error", String(err && err.message));
+      console.error(err && err.message);
     }
     await browser.close();
     await dash.close();

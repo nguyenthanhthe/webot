@@ -35,6 +35,11 @@ MEMBERS = [
     (ROOT / "run.py", "run.py"),
     (ROOT / "setcreds.py", "setcreds.py"),
     (ROOT / "config.json", "config.json"),
+    # A small diagnostic that checks the API from the phone itself.
+    (ROOT / "tools" / "probe_phone.py", "probe_phone.py"),
+    (ROOT / "tools" / "probe_socket.py", "probe_socket.py"),
+    (ROOT / "tools" / "check_hosts.py", "check_hosts.py"),
+    (ROOT / "tools" / "show_lines.py", "show_lines.py"),
     # The payload is shared with the Node/Playwright runner and lives at the
     # root of the package on the phone.
     (ROOT / "web" / "payload.js", "payload.js"),

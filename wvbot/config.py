@@ -30,6 +30,15 @@ TURNSTILE_SITEKEY_VISIBLE = "0x4AAAAAAATLZulAZ6iRPZsU"
 
 STATE_DIR = Path.home() / ".wv-bot"
 
+# On Android the home directory is fixed: `Path.home()` can point somewhere
+# else when the process is started through `run-as`.
+ANDROID_HOME = Path("/data/data/com.termux/files/home")
+if ANDROID_HOME.is_dir():
+    STATE_DIR = ANDROID_HOME / ".wv-bot"
+
+# The durable credential, stored on its own (mode 600).
+REFRESH_TOKEN_FILE = "refresh_token.txt"
+
 
 def state_path(name: str) -> Path:
     """Return a path inside the state directory for a plain file name.
@@ -76,8 +85,10 @@ class Config:
     chat_enabled: bool = False
     chat_messages: list[str] = field(default_factory=list)
     # Seconds to wait before re-joining after being kicked / disconnected.
-    reconnect_delay_sec: float = 5.0
-    reconnect_delay_max_sec: float = 120.0
+    # The server bans players that join too often, so this is deliberately
+    # generous rather than quick.
+    reconnect_delay_sec: float = 60.0
+    reconnect_delay_max_sec: float = 300.0
     # Seconds of "play then leave" before recycling into a fresh room.
     idle_restart_sec: float = 900.0
     request_timeout_sec: float = 20.0
@@ -144,5 +155,16 @@ def load_config(config_file: str | None = None) -> Config:
         token = jwt_file.read_text(encoding="utf-8").strip()
         if token:
             cfg.cf_jwt = token
+
+    # The refresh token lives in its own file (mode 600) so it never ends
+    # up in a config file that gets copied around.
+    try:
+        refresh_file = state_path(REFRESH_TOKEN_FILE)
+    except ValueError:
+        refresh_file = None
+    if refresh_file is not None and refresh_file.is_file():
+        token = refresh_file.read_text(encoding="utf-8").strip()
+        if token:
+            cfg.refresh_token = token
 
     return cfg
