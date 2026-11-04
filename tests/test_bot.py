@@ -10,7 +10,9 @@ import time
 import types
 import unittest
 from datetime import datetime, timezone
+from unittest import mock
 
+import wvbot.bot as bot_module
 from wvbot.bot import KILLER_ROLES, PROTECTOR_ROLES, Bot, _extract_game_info, _parse_ban_until
 from wvbot.dashboard import StatusStore
 
@@ -163,6 +165,70 @@ class RoomSkipTest(unittest.TestCase):
         self.assertLess(Config().room_skip_chance, 0.5)
 
 
+class PickRoomTest(unittest.TestCase):
+    def _bot(self) -> Bot:
+        return shell(store=StatusStore())
+
+    def test_empty_list_gives_none(self) -> None:
+        self.assertIsNone(self._bot()._pick_room([]))
+
+    def test_a_single_room_is_taken(self) -> None:
+        room = {"gameId": 1}
+        self.assertEqual(self._bot()._pick_room([room]), room)
+
+    def test_low_xp_rooms_are_left_alone(self) -> None:
+        good = {"gameId": 1, "regularXp": 20}
+        other_good = {"gameId": 2, "regularXp": 18}
+        poor = {"gameId": 3, "regularXp": 5}
+        pick = self._bot()._pick_room
+        for _ in range(40):
+            self.assertIn(pick([good, other_good, poor]), (good, other_good))
+
+    def test_without_xp_data_the_choice_is_free(self) -> None:
+        a = {"gameId": 1}
+        b = {"gameId": 2}
+        self.assertIn(self._bot()._pick_room([a, b]), (a, b))
+
+    def test_a_broken_xp_value_counts_as_zero(self) -> None:
+        a = {"gameId": 1, "regularXp": "many"}
+        b = {"gameId": 2}
+        self.assertIn(self._bot()._pick_room([a, b]), (a, b))
+
+
+class NightlyRestartTest(unittest.TestCase):
+    def _bot(self, cfg_hour) -> Bot:
+        return shell(
+            cfg=types.SimpleNamespace(daily_restart_hour=cfg_hour),
+            _last_restart_day="",
+            store=StatusStore(),
+        )
+
+    def test_due_at_the_configured_hour(self) -> None:
+        bot = self._bot(4)
+        with mock.patch.object(bot_module.time, "localtime") as lt:
+            lt.return_value = types.SimpleNamespace(tm_hour=4)
+            with mock.patch.object(bot_module.time, "strftime", return_value="2026-11-05"):
+                self.assertTrue(bot._nightly_restart_due())
+
+    def test_not_due_at_another_hour(self) -> None:
+        bot = self._bot(4)
+        with mock.patch.object(bot_module.time, "localtime") as lt:
+            lt.return_value = types.SimpleNamespace(tm_hour=17)
+            self.assertFalse(bot._nightly_restart_due())
+
+    def test_disabled_when_none(self) -> None:
+        self.assertFalse(self._bot(None)._nightly_restart_due())
+
+    def test_only_once_per_day(self) -> None:
+        bot = self._bot(4)
+        with mock.patch.object(bot_module.time, "localtime") as lt:
+            lt.return_value = types.SimpleNamespace(tm_hour=4)
+            with mock.patch.object(bot_module.time, "strftime", return_value="2026-11-05"):
+                self.assertTrue(bot._nightly_restart_due())
+                bot._last_restart_day = "2026-11-05"
+                self.assertFalse(bot._nightly_restart_due())
+
+
 class ProjectionTest(unittest.TestCase):
     def test_rate_and_hours_to_next_level(self) -> None:
         bot = shell(store=StatusStore())
@@ -190,6 +256,80 @@ class ProjectionTest(unittest.TestCase):
         projection = bot._projection()
         # Level falls back to 1, whose requirement is 200 xp.
         self.assertEqual(projection["hours_to_next_level"], 1.0)
+
+
+class DailyRewardTest(unittest.TestCase):
+    """The daily ladder holds the whole month, so only a reward whose
+    date has arrived may be picked up."""
+
+    def test_a_reward_of_a_future_day_is_not_due(self) -> None:
+        now = datetime(2026, 11, 5, tzinfo=timezone.utc)
+        future = {"type": "GOLD", "amount": 25, "canBeClaimedDate": "2026-11-20T00:00:00.000Z"}
+        self.assertFalse(Bot._reward_is_due(future, now))
+
+    def test_a_reward_of_today_is_due(self) -> None:
+        now = datetime(2026, 11, 5, tzinfo=timezone.utc)
+        today = {"type": "GOLD", "amount": 10, "canBeClaimedDate": "2026-11-05T00:00:00.000Z"}
+        self.assertTrue(Bot._reward_is_due(today, now))
+
+    def test_a_reward_without_a_date_is_due(self) -> None:
+        now = datetime(2026, 11, 5, tzinfo=timezone.utc)
+        self.assertTrue(Bot._reward_is_due({"type": "GOLD", "amount": 5}, now))
+
+    def test_a_broken_date_is_due(self) -> None:
+        now = datetime(2026, 11, 5, tzinfo=timezone.utc)
+        self.assertTrue(Bot._reward_is_due({"canBeClaimedDate": "not a date"}, now))
+
+    def test_a_reward_in_the_past_is_due(self) -> None:
+        now = datetime(2026, 11, 5, tzinfo=timezone.utc)
+        past = {"canBeClaimedDate": "2026-11-01T00:00:00.000Z"}
+        self.assertTrue(Bot._reward_is_due(past, now))
+
+    def test_only_a_due_reward_is_claimed(self) -> None:
+        bot = shell(store=StatusStore())
+        calls = []
+
+        class FakeRewards:
+            def daily_rewards(self):
+                return [
+                    {"type": "GOLD", "amount": 10, "claimed": True},
+                    {
+                        "type": "GOLD",
+                        "amount": 25,
+                        "claimed": False,
+                        "canBeClaimedDate": "2026-12-01T00:00:00.000Z",
+                    },
+                ]
+
+            def claim_daily_reward(self):
+                calls.append(True)
+                return {"ok": True}
+
+        bot._claim_daily(FakeRewards())
+        # The only open reward is of a future day, so nothing is claimed.
+        self.assertEqual(calls, [])
+
+    def test_a_due_reward_is_claimed(self) -> None:
+        bot = shell(store=StatusStore())
+        calls = []
+
+        class FakeRewards:
+            def daily_rewards(self):
+                return [
+                    {
+                        "type": "GOLD",
+                        "amount": 25,
+                        "claimed": False,
+                        "canBeClaimedDate": "2020-01-01T00:00:00.000Z",
+                    }
+                ]
+
+            def claim_daily_reward(self):
+                calls.append(True)
+                return {"ok": True}
+
+        bot._claim_daily(FakeRewards())
+        self.assertEqual(len(calls), 1)
 
 
 class PlayerLevelsTest(unittest.TestCase):

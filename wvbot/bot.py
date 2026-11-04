@@ -21,10 +21,13 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import random
+import sys
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from . import __version__
@@ -102,6 +105,8 @@ class Bot:
         # Watches the game for a patch that could break the protocol.
         self.updates = UpdateWatcher(cfg, self.http, self.auth.auth_headers())
         self._last_update_check = 0.0
+        # The day the process re-executed itself the last time.
+        self._last_restart_day = ""
 
     # ------------------------------------------------------------------
     def _load_device_id(self) -> str:
@@ -159,6 +164,54 @@ class Bot:
         The skipped room does not count as a join for the hourly limit.
         """
         return random.SystemRandom().random() < self.cfg.room_skip_chance
+
+    # ------------------------------------------------------------------
+    def _nightly_restart_due(self) -> bool:
+        """True once a day at the configured local hour."""
+        hour = self.cfg.daily_restart_hour
+        if hour is None:
+            return False
+        if time.localtime().tm_hour != hour:
+            return False
+        today = time.strftime("%Y-%m-%d")
+        return self._last_restart_day != today
+
+    def _reexec(self) -> None:
+        """Replace the process with a fresh one, same command line.
+
+        ``os.execv`` keeps the pid and the lock file valid, so the
+        service runner and the watchdog never notice.  The durable
+        credential lives on disk, so the fresh process authenticates by
+        itself.
+        """
+        self._last_restart_day = time.strftime("%Y-%m-%d")
+        self.log_event("bot", "daily restart - replacing the process")
+        self.store.update(status="restarting")
+        os.execv(sys.executable, [sys.executable, *sys.argv])
+
+    def _pick_room(self, rooms: list[dict[str, Any]]) -> dict[str, Any] | None:
+        """Choose a room, preferring the ones that pay the most XP.
+
+        Among the matches the rooms within 80% of the best ``regularXp``
+        are kept, and the choice between them stays random - a human
+        does not always take the same room either.
+        """
+        if not rooms:
+            return None
+        if len(rooms) == 1:
+            return rooms[0]
+
+        def xp(room: dict[str, Any]) -> int:
+            try:
+                return int(room.get("regularXp") or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        best = max(xp(room) for room in rooms)
+        if best <= 0:
+            return random.SystemRandom().choice(rooms)
+        top = [room for room in rooms if xp(room) >= best * 0.8]
+        return random.SystemRandom().choice(top)
 
     # ------------------------------------------------------------------
     # ------------------------------------------------------------------
@@ -248,6 +301,11 @@ class Bot:
                 self.stop_event.wait(2.0)
                 continue
 
+            # A long 24/7 run stays fresh when the process replaces
+            # itself once a day, between two games.
+            if self._nightly_restart_due():
+                self._reexec()
+
             try:
                 played = self.session()
                 self._failures = 0
@@ -295,7 +353,9 @@ class Bot:
             self.store.update(status="waiting for room")
             return False
 
-        room = random.SystemRandom().choice(rooms)
+        room = self._pick_room(rooms)
+        if room is None:
+            return False
         room_id = GameApi._room_id(room)
         room_name = GameApi._room_name(room)
 
@@ -566,11 +626,20 @@ class Bot:
         ladder = rewards.daily_rewards()
         if not ladder:
             return
-        open_ones = [r for r in ladder if not r.get("claimed")]
-        if not open_ones:
+        # Only a reward whose date has arrived can be picked up.  The
+        # ladder holds the whole month, so most of its entries are
+        # still in the future.  The server refuses those, and the
+        # claim would be repeated on every round.
+        now = datetime.now(timezone.utc)
+        due = [
+            reward
+            for reward in ladder
+            if not reward.get("claimed") and self._reward_is_due(reward, now)
+        ]
+        if not due:
             return
-        kind = str(open_ones[0].get("type") or "reward")
-        amount = open_ones[0].get("amount")
+        kind = str(due[0].get("type") or "reward")
+        amount = due[0].get("amount")
         try:
             result = rewards.claim_daily_reward()
         except Exception as exc:  # noqa: BLE001
@@ -580,6 +649,25 @@ class Bot:
         # refused must not read as a success.
         detail = json.dumps(result)[:200] if result else "server answered nothing"
         self.log_event("reward", f"daily reward {kind} x{amount} -> {detail}")
+
+    @staticmethod
+    def _reward_is_due(reward: dict[str, Any], now: datetime) -> bool:
+        """Is the date of this reward reached yet?
+
+        An entry without a date is due right away.  A date the server
+        sent in a shape that cannot be read is treated as due as well,
+        so a broken answer never blocks the reward.
+        """
+        raw = reward.get("canBeClaimedDate")
+        if not raw:
+            return True
+        try:
+            moment = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except ValueError:
+            return True
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        return moment <= now
 
     def _spin_wheel(self, rewards: Rewards) -> None:
         conditions = rewards.golden_wheel_conditions()
