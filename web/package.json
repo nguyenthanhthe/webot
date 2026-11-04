@@ -1,0 +1,17 @@
+{
+  "name": "wv-web-bot",
+  "version": "0.0.2",
+  "private": true,
+  "description": "Headless websocket-injection bot for Wolvesville custom games",
+  "type": "module",
+  "main": "bot.mjs",
+  "scripts": {
+    "start": "node bot.mjs",
+    "login": "node bot.mjs --login-only",
+    "dashboard": "node bot.mjs --dashboard-only"
+  },
+  "dependencies": {
+    "playwright": "^1.64.1",
+    "socket.io-client": "^4.8.1"
+  }
+}

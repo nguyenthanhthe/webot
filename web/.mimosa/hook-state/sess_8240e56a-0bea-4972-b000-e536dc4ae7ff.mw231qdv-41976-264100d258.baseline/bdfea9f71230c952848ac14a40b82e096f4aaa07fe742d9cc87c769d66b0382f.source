@@ -1,0 +1,602 @@
+/**
+ * The injected half of the bot.
+ *
+ * It runs inside the Wolvesville web client and drives the game over
+ * socket.io - no clicking, no screen, no coordinate guessing.  The browser
+ * itself handles Cloudflare and the login; this file handles the game.
+ *
+ * Injected by bot.mjs before any page script runs.
+ */
+(() => {
+  if (window.__wvbot) return;
+
+  const CFG = Object.assign(
+    {
+      gameHost: "https://game.api-wolvesville.com",
+      roomNames: ["vill win"],
+      language: "en",
+      gameMode: "custom",
+      claimDoubleXp: true,
+    },
+    window.__WV_CONFIG || {},
+  );
+
+  const WOLF_TEAMS = ["WEREWOLF", "WOLF", "EVIL", "WEREWOLVES"];
+  const KILLER_EVENTS = {
+    priest: "game-priest-kill-player",
+    vigilante: "game-vigilante-shoot",
+    gunner: "game-gunner-shoot-player",
+  };
+
+  const state = {
+    status: "booting",
+    phase: "lobby",
+    room: null,
+    game_id: null,
+    role: null,
+    players: 0,
+    alive: 0,
+    xp_total: 0,
+    xp_last: 0,
+    games_played: 0,
+    wins: 0,
+    kills: 0,
+    reconnects: 0,
+    errors: 0,
+    last_error: null,
+  };
+
+  const runtime = {
+    token: null,
+    deviceId: null,
+    lobby: null,
+    game: null,
+    ownId: null,
+    role: { id: "", name: "", team: "" },
+    players: new Map(),
+    dead: new Set(),
+    dayVotes: new Map(),
+    messages: [],
+    award: null,
+    joining: false,
+    reconnectTimer: null,
+  };
+
+  /* ---------------------------------------------------------------- */
+  /* reporting                                                        */
+  /* ---------------------------------------------------------------- */
+
+  function reportEvent(level, message) {
+    try {
+      window.__wvbot({ kind: "event", level, message: String(message).slice(0, 300) });
+    } catch (err) {
+      /* the binding may not exist yet */
+    }
+  }
+
+  function pushState(patch) {
+    Object.assign(state, patch || {});
+    state.players = runtime.players.size;
+    state.alive = [...runtime.players.values()].filter((p) => p.isAlive).length;
+    try {
+      window.__wvbot({ kind: "state", state: { ...state } });
+    } catch (err) {
+      /* ignore */
+    }
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* helpers                                                          */
+  /* ---------------------------------------------------------------- */
+
+  function parsePayload(raw) {
+    let value = raw;
+    for (let i = 0; i < 2; i += 1) {
+      if (typeof value === "string") {
+        try {
+          value = JSON.parse(value);
+        } catch (err) {
+          return value;
+        }
+      } else {
+        break;
+      }
+    }
+    return value;
+  }
+
+  function readToken() {
+    try {
+      for (const key of Object.keys(window.localStorage)) {
+        const raw = window.localStorage.getItem(key);
+        if (!raw || raw.indexOf("refreshToken") === -1) continue;
+        const parsed = JSON.parse(raw);
+        const manager = parsed.stsTokenManager || parsed;
+        if (manager.accessToken) return manager.accessToken;
+      }
+    } catch (err) {
+      /* ignore */
+    }
+    return null;
+  }
+
+  function pick(list) {
+    return list[Math.floor(Math.random() * list.length)];
+  }
+
+  function isWolfRole(roleId, team) {
+    return (
+      WOLF_TEAMS.indexOf(String(team || "").toUpperCase()) !== -1 ||
+      ["werewolf", "alpha-werewolf", "big-wolf"].indexOf(String(roleId || "").toLowerCase()) !== -1
+    );
+  }
+
+  function accusations() {
+    const counts = new Map();
+    for (const message of runtime.messages) {
+      const text = String((message && message.msg) || "").toLowerCase();
+      if (!/(wolf|sus|vote|susp|werewolf|mày|sói|nghi ngờ|bỏ phiếu)/.test(text)) continue;
+      for (const player of runtime.players.values()) {
+        if (player.id === message.authorId) continue;
+        if (player.username && text.indexOf(String(player.username).toLowerCase()) !== -1) {
+          counts.set(player.id, (counts.get(player.id) || 0) + 1);
+        }
+      }
+    }
+    return counts;
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* room list                                                        */
+  /* ---------------------------------------------------------------- */
+
+  async function listRooms() {
+    const token = runtime.token || readToken();
+    if (!token) throw new Error("no firebase token in localStorage");
+    const url = `${CFG.gameHost}/api/public/game/custom?language=${encodeURIComponent(CFG.language)}`;
+    const response = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        ids: "1",
+      },
+    });
+    if (!response.ok) throw new Error(`custom game list -> HTTP ${response.status}`);
+    const data = await response.json();
+    const games = data.openGames || data.games || [];
+    const wanted = CFG.roomNames.map((name) => String(name).toLowerCase());
+    return games.filter((room) => {
+      const name = String((room && (room.name || room.gameName || room.title)) || "").toLowerCase();
+      return name && wanted.some((needle) => name.indexOf(needle) !== -1);
+    });
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* sockets                                                          */
+  /* ---------------------------------------------------------------- */
+
+  function connectLobby() {
+    if (runtime.lobby) {
+      try {
+        runtime.lobby.close();
+      } catch (err) {
+        /* ignore */
+      }
+    }
+    const socket = window.io(CFG.gameHost, {
+      path: "/socket.io",
+      transports: ["websocket"],
+      query: { ids: 1, apiV: 1 },
+      auth: { firebaseToken: runtime.token },
+      reconnection: true,
+      reconnectionDelay: 2000,
+      reconnectionDelayMax: 10000,
+    });
+    runtime.lobby = socket;
+
+    socket.on("connect", () => {
+      reportEvent("info", "lobby socket connected");
+      pushState({ status: "looking for room", last_error: null });
+      scheduleJoin(500);
+    });
+    socket.on("connect_error", (err) => {
+      reportEvent("warn", `lobby connect error: ${err && err.message}`);
+      pushState({ errors: state.errors + 1, last_error: `lobby: ${err && err.message}` });
+    });
+    socket.on("disconnect", (reason) => {
+      reportEvent("warn", `lobby disconnected: ${reason}`);
+      pushState({ status: "reconnecting", reconnects: state.reconnects + 1 });
+      scheduleJoin(3000);
+    });
+
+    socket.onAny((event, payload) => {
+      if (event === "game-joined" || event === "mg:running-game" || event === "mg:game-running") {
+        const info = extractGameInfo(payload);
+        if (info && info.gameId) {
+          reportEvent("game", `joined game ${info.gameId}`);
+          openGameSocket(info);
+        }
+      }
+    });
+  }
+
+  function extractGameInfo(raw) {
+    const data = parsePayload(raw);
+    if (!data || typeof data !== "object") return null;
+    const info = {};
+    if (data.gameId !== undefined && data.gameId !== null) info.gameId = data.gameId;
+    else if (data.id !== undefined && data.id !== null) info.gameId = data.id;
+    for (const key of ["serverUrl", "server", "url"]) {
+      if (typeof data[key] === "string" && data[key].indexOf("http") === 0) {
+        info.serverUrl = data[key];
+        break;
+      }
+    }
+    const values = Object.values(data);
+    if (info.gameId === undefined && values.length) info.gameId = values[0];
+    if (!info.serverUrl && values.length > 1) {
+      const candidate = values[1];
+      if (typeof candidate === "string" && candidate.indexOf("http") === 0) info.serverUrl = candidate;
+    }
+    return info;
+  }
+
+  function openGameSocket(info) {
+    const socket = window.io(info.serverUrl || CFG.gameHost, {
+      path: "/socket.io",
+      transports: ["websocket"],
+      query: {
+        firebaseToken: runtime.token,
+        gameId: info.gameId,
+        reconnect: "true",
+        gameMode: CFG.gameMode,
+        randomAvatarSlot: "false",
+        dodgeBlockedPlayers: "false",
+        deviceId: runtime.deviceId,
+      },
+      auth: { firebaseToken: runtime.token },
+      reconnection: true,
+      reconnectionDelay: 1500,
+    });
+    runtime.game = socket;
+
+    socket.on("connect", () => {
+      reportEvent("game", "game socket connected");
+      pushState({ status: "playing", game_id: String(info.gameId), phase: "joined" });
+    });
+    socket.on("connect_error", (err) => {
+      reportEvent("warn", `game socket error: ${err && err.message}`);
+      pushState({ errors: state.errors + 1 });
+    });
+    socket.on("disconnect", (reason) => {
+      reportEvent("warn", `game socket disconnected: ${reason}`);
+      pushState({ status: "reconnecting", reconnects: state.reconnects + 1 });
+    });
+    socket.onAny((event, payload) => handleGameEvent(socket, event, payload));
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* game logic                                                       */
+  /* ---------------------------------------------------------------- */
+
+  function handleGameEvent(socket, event, raw) {
+    const data = parsePayload(raw);
+    switch (event) {
+      case "game-started":
+        onGameStarted(data);
+        break;
+      case "game-day-voting-started":
+        pushState({ phase: "day-voting" });
+        dayVote(socket);
+        break;
+      case "game-night-started":
+        pushState({ phase: "night" });
+        nightVote(socket);
+        break;
+      case "game-werewolves-vote-set":
+        pushState({ phase: "night-voting" });
+        nightVote(socket);
+        break;
+      case "game-day-vote-set":
+        onDayVote(data);
+        killerAction(socket);
+        break;
+      case "game-players-killed":
+        onKilled(data);
+        break;
+      case "game-werewolves-set-roles":
+        onWolfRoles(data);
+        break;
+      case "game-cupid-lover-ids-and-roles":
+        if (data && data.loverId) runtime.ownLover = data.loverId;
+        break;
+      case "game-reconnect-set-players":
+        onReconnectPlayers(data);
+        break;
+      case "game:chat-public:msg":
+        if (data && typeof data === "object") {
+          runtime.messages.push(data);
+          if (runtime.messages.length > 200) runtime.messages.shift();
+        }
+        break;
+      case "game-over-awards-available":
+        onGameOver(socket, data);
+        break;
+      default:
+        break;
+    }
+  }
+
+  function onGameStarted(data) {
+    runtime.players = new Map();
+    runtime.dead = new Set();
+    runtime.dayVotes = new Map();
+    runtime.messages = [];
+    const role = data && data.role;
+    if (role && typeof role === "object") {
+      runtime.role = {
+        id: String(role.id || role._id || ""),
+        name: String(role.name || ""),
+        team: String(role.team || ""),
+      };
+    } else if (typeof role === "string") {
+      runtime.role = { id: role, name: role, team: "" };
+    }
+    const own = data && (data.playerId || data.id || data.you);
+    if (own && typeof own === "object") runtime.ownId = own.id || own._id;
+    else if (typeof own === "string" || typeof own === "number") runtime.ownId = own;
+
+    const players = (data && (data.players || data.gamePlayers)) || [];
+    if (Array.isArray(players)) {
+      for (const raw of players) {
+        const player = parsePlayer(raw);
+        if (player) runtime.players.set(String(player.id), player);
+      }
+    }
+    reportEvent(
+      "game",
+      `game started: role=${runtime.role.name || runtime.role.id || "?"} players=${runtime.players.size}`,
+    );
+    pushState({ role: runtime.role.name || runtime.role.id || null, phase: "started", status: "playing" });
+  }
+
+  function parsePlayer(raw) {
+    if (!raw || typeof raw !== "object") return null;
+    const id = raw.id || raw.playerId || raw._id;
+    if (id === undefined || id === null) return null;
+    let roleId = "";
+    let team = "";
+    if (raw.role && typeof raw.role === "object") {
+      roleId = String(raw.role.id || raw.role._id || "");
+      team = String(raw.role.team || "");
+    } else if (raw.role) {
+      roleId = String(raw.role);
+    }
+    return {
+      id: String(id),
+      username: String(raw.username || raw.name || ""),
+      isAlive: raw.isAlive === undefined ? true : Boolean(raw.isAlive),
+      role: roleId,
+      team,
+    };
+  }
+
+  function onKilled(data) {
+    let ids = [];
+    if (Array.isArray(data)) ids = data;
+    else if (data && typeof data === "object") {
+      for (const key of ["playerIds", "ids", "killedPlayerIds", "players"]) {
+        if (Array.isArray(data[key])) {
+          ids = data[key];
+          break;
+        }
+      }
+      if (!ids.length && (data.playerId || data.id)) ids = [data.playerId || data.id];
+    }
+    for (const id of ids) {
+      const key = String(id);
+      runtime.dead.add(key);
+      const player = runtime.players.get(key);
+      if (player) player.isAlive = false;
+    }
+  }
+
+  function onWolfRoles(data) {
+    if (!data || typeof data !== "object") return;
+    let entries = data.roles || data.players || data;
+    if (!Array.isArray(entries)) entries = Object.values(entries || {});
+    for (const entry of entries) {
+      if (!entry || typeof entry !== "object") continue;
+      const id = entry.playerId || entry.id;
+      const player = runtime.players.get(String(id));
+      if (!player) continue;
+      if (entry.role && typeof entry.role === "object") {
+        player.role = String(entry.role.id || entry.role._id || "");
+        player.team = String(entry.role.team || "");
+      } else if (entry.role) {
+        player.role = String(entry.role);
+      }
+    }
+  }
+
+  function onDayVote(data) {
+    if (!data || typeof data !== "object") return;
+    const target = data.targetPlayerId;
+    if (target === undefined || target === null) return;
+    const author = data.authorId || runtime.ownId;
+    runtime.dayVotes.set(String(author), String(target));
+  }
+
+  function onReconnectPlayers(data) {
+    if (!data || typeof data !== "object") return;
+    for (const [id, info] of Object.entries(data)) {
+      if (!info || typeof info !== "object") continue;
+      const player = runtime.players.get(String(id));
+      if (!player) continue;
+      if (info.isAlive !== undefined) {
+        player.isAlive = Boolean(info.isAlive);
+        if (!player.isAlive) runtime.dead.add(String(id));
+      }
+      if (info.isYou || info.you || info.isMe) runtime.ownId = id;
+    }
+  }
+
+  function alivePlayers() {
+    return [...runtime.players.values()].filter((p) => p.isAlive && !runtime.dead.has(p.id));
+  }
+
+  function dayVote(socket) {
+    const alive = alivePlayers();
+    if (!alive.length) return;
+    const counts = accusations();
+    let target = null;
+    let best = 0;
+    for (const [id, count] of counts) {
+      if (count > best) {
+        best = count;
+        target = id;
+      }
+    }
+    if (target) {
+      socket.emit("game-day-vote-set", { targetPlayerId: target });
+      reportEvent("action", `day vote -> ${target}`);
+    } else {
+      socket.emit("game-vote-to-skip");
+      reportEvent("action", "day vote: skip");
+    }
+  }
+
+  function nightVote(socket) {
+    if (!isWolfRole(runtime.role.id, runtime.role.team)) return;
+    const alive = alivePlayers().filter((p) => p.id !== String(runtime.ownId));
+    if (!alive.length) return;
+    const counts = accusations();
+    const quiet = alive.filter((p) => !counts.get(p.id));
+    const pool = quiet.length ? quiet : alive;
+    const target = pick(pool).id;
+    socket.emit("game-werewolves-vote-set", { targetPlayerId: target });
+    reportEvent("action", `werewolf vote -> ${target}`);
+  }
+
+  function killerAction(socket) {
+    const event = KILLER_EVENTS[String(runtime.role.id || "").toLowerCase()];
+    if (!event) return;
+    let target = null;
+    for (const value of runtime.dayVotes.values()) target = value;
+    if (!target) return;
+    socket.emit(event, { targetPlayerId: target });
+    reportEvent("action", `${event} -> ${target}`);
+  }
+
+  function onGameOver(socket, data) {
+    const award = (data && (data.playerAward || data.award)) || {};
+    const xp = Number(award.awardedTotalXp || award.xp || 0);
+    const levels = Number(award.awardedLevels || 0);
+    const won = Boolean(award.isWinner || award.won);
+    runtime.award = award;
+    pushState({
+      phase: "game-over",
+      status: "game-over",
+      xp_last: xp,
+      xp_total: state.xp_total + xp,
+      games_played: state.games_played + 1,
+      wins: state.wins + (won ? 1 : 0),
+    });
+    reportEvent("xp", `game over: +${xp} xp${levels ? ` (+${levels} levels)` : ""}${won ? " - won" : ""}`);
+
+    if (CFG.claimDoubleXp && award.canClaimDoubleXp) {
+      try {
+        socket.emit("videoAdClaimReward", { adId: "DOUBLE_XP", type: "XP_DOUBLER" });
+        socket.emit("game-over-double-xp");
+        reportEvent("xp", "claimed double xp");
+      } catch (err) {
+        reportEvent("warn", `double xp failed: ${err}`);
+      }
+    }
+
+    try {
+      socket.close();
+    } catch (err) {
+      /* ignore */
+    }
+    runtime.game = null;
+    scheduleJoin(4000);
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* room joining                                                     */
+  /* ---------------------------------------------------------------- */
+
+  function scheduleJoin(delay) {
+    if (runtime.reconnectTimer) clearTimeout(runtime.reconnectTimer);
+    runtime.reconnectTimer = setTimeout(joinRoom, delay);
+  }
+
+  async function joinRoom() {
+    if (runtime.joining) return;
+    runtime.joining = true;
+    try {
+      runtime.token = readToken();
+      if (!runtime.token) throw new Error("no firebase token available");
+      if (!runtime.lobby || !runtime.lobby.connected) {
+        connectLobby();
+        return;
+      }
+      const rooms = await listRooms();
+      if (!rooms.length) {
+        reportEvent("lobby", "no matching room open");
+        pushState({ status: "waiting for room", room: null });
+        scheduleJoin(15000);
+        return;
+      }
+      const room = pick(rooms);
+      const roomId = room.id || room.miniGameId || room.gameId || room._id;
+      const roomName = room.name || room.gameName || room.title;
+      reportEvent("lobby", `joining room "${roomName}" (${roomId})`);
+      pushState({ status: "joining", room: roomName });
+      runtime.lobby.emit("mg:join-open-game", { miniGameId: roomId });
+      scheduleJoin(30000);
+    } catch (err) {
+      reportEvent("error", `join failed: ${err && err.message}`);
+      pushState({ status: "error", last_error: String(err && err.message), errors: state.errors + 1 });
+      scheduleJoin(10000);
+    } finally {
+      runtime.joining = false;
+    }
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* boot                                                             */
+  /* ---------------------------------------------------------------- */
+
+  function boot() {
+    runtime.token = readToken();
+    if (!runtime.token) {
+      reportEvent("error", "no firebase token yet (not logged in?)");
+      pushState({ status: "waiting for login" });
+      setTimeout(boot, 5000);
+      return;
+    }
+    runtime.deviceId = (() => {
+      try {
+        return window.crypto.randomUUID();
+      } catch (err) {
+        return `wv-${Date.now()}`;
+      }
+    })();
+    reportEvent("bot", "payload started");
+    connectLobby();
+  }
+
+  window.__wvbot = Object.assign(function () {}, {
+    alive: true,
+    state,
+    joinRoom,
+    listRooms,
+  });
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", boot);
+  } else {
+    boot();
+  }
+})();
