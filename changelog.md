@@ -67,6 +67,14 @@ like a cautious human and the dashboard shows the value.
   packages, pushes, unpacks (run-as), swaps the directory, restarts
   the service and verifies the version on the dashboard.
 
+### Known issues
+
+- The **daily reward ladder** reports an open rung ("TALISMAN") whose
+  claim POST comes back with an empty body and no effect - the rung
+  stays open and the bot retries it every loop.  Under investigation
+  with `tools/probe_daily.py`; until then the log line is the honest
+  "server answered nothing" instead of a fake success.
+
 ## [0.0.2] - 2026-11-04
 
 The bot plays a real game end to end and runs as a background service.
