@@ -97,19 +97,26 @@ Engine.IO v4 / socket.io v4, websocket-only, path `/socket.io/`.
 
 ### The game socket (custom games)
 
-A custom game is entered **directly** - there is no lobby step.  The
-game socket is opened with the game id and the mode in the query and the
-firebase token in the handshake auth:
+A custom game is played on the **lobby socket**, not on a separate game
+socket.  The client emits `mg:join-open-game` with the room id and the
+server sends the whole game - `game-started`, the votes, the awards -
+on that same socket.
 
 ```
-query = {gameId, gameMode: "custom", reconnect: "true", ids: 1, apiV: 1, deviceId}
+query = {firebaseToken, ids: 1, apiV: 1, b: <random 42..99>, deviceId}
 auth  = {firebaseToken}
 transports = ["websocket"]
+emit  = "mg:join-open-game", {miniGameId: <room id>}
 ```
 
-This was verified live from the phone: the server accepted the handshake
-and answered with a game event, so the auth chain works without a
-browser and without a `Cf-JWT`.
+A **separate** socket with the room id in the query never works: the
+server answers `error-game-connection-lost`, no matter whether
+`reconnect` is set or not.  The room id belongs into the join event,
+not into the handshake.
+
+This was verified live from the phone: the bot joined a real room, was
+listed in the player list of `game-started` with its own role, voted
+and received the XP award at the end of the game.
 
 ### The lobby socket (quick games)
 
@@ -121,9 +128,21 @@ auth  = {firebaseToken}
 ```
 
 It carries the quick-game events (`mg:games-open`, `mg:game-running`,
-`lobby:chat-msg:`, `player-joined-and-equipped-items`, ...).  The
-`mg:join-open-game` event belongs to this socket, **not** to the custom
-games - custom games are joined through the game socket above.
+`lobby:chat-msg:`, `player-joined-and-equipped-items`, ...).
+
+### Custom games with a password
+
+The room list carries a `hasPassword` flag.  The official client asks
+for the password and sends it in the handshake of the game socket:
+
+```
+GET {game}/api/public/game/customGames/checkPasswordPresence?gameId=..
+GET {game}/api/public/game/customGames/validatePassword?gameId=..&password=..
+query = {firebaseToken, gameId, gameMode: "custom", password, deviceId, deviceSecurityLevel}
+```
+
+The bot skips rooms with a password by default (`allow_password_rooms`
+in the config turns them back on, `room_password` sends the password).
 
 ### Server -> client
 
@@ -146,9 +165,9 @@ games - custom games are joined through the game socket above.
 
 | Event | Payload |
 |---|---|
-| `mg:join-open-game` | `{miniGameId}` (lobby socket, quick games) |
+| `mg:join-open-game` | **plain object** `{miniGameId}` (lobby socket, custom games) |
 | `game-day-vote-set` | **JSON string** `{targetPlayerId}` |
-| `game-vote-to-skip` | **JSON string** `{}` |
+| `game-vote-to-skip` | **no payload** |
 | `game-werewolves-vote-set` | **JSON string** `{targetPlayerId}` |
 | `game-priest-kill-player` / `game-vigilante-shoot` / `game-gunner-shoot-player` | **JSON string** `{targetPlayerId}` |
 | `game-junior-werewolf-selected-player` | **JSON string** `{targetPlayerId}` |
@@ -156,9 +175,9 @@ games - custom games are joined through the game socket above.
 | `videoAdClaimReward` | **plain object** `{adId: "DOUBLE_XP", type: "XP_DOUBLER"}` |
 | `game-over-double-xp` | - |
 
-> Every game action is sent as a **JSON string** - only the ad reward
-> event takes a plain object.  This is what the official client does and
-> the server expects.
+> Every game action is sent as a **JSON string** - the ad reward event
+> and the join event take a plain object.  This is what the official
+> client does and the server expects.
 
 ### The room list and the room names
 
