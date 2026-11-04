@@ -1,0 +1,7 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# Started by Termux:Boot after every reboot.
+#
+# The bot is a service, so this only has to hand it back to the
+# service manager.
+sleep 15
+sh /data/data/com.termux/files/home/bot_ctl.sh start

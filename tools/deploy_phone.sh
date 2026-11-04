@@ -29,6 +29,29 @@ if [ -f "$STAGE/deploy.sh" ]; then
   chmod 700 "$HOME_DIR/deploy.sh"
 fi
 
+# The service runner, the control script and the boot hook.
+# The runner is what the Termux background service executes, so the bot
+# does not need a terminal session.
+mkdir -p "$HOME_DIR/service" "$HOME_DIR/.termux/boot"
+if [ -f "$STAGE/service_runner.sh" ]; then
+  cp "$STAGE/service_runner.sh" "$HOME_DIR/service/runner.sh"
+  chmod 700 "$HOME_DIR/service/runner.sh"
+fi
+if [ -f "$STAGE/bot_ctl.sh" ]; then
+  cp "$STAGE/bot_ctl.sh" "$HOME_DIR/bot_ctl.sh"
+  chmod 700 "$HOME_DIR/bot_ctl.sh"
+fi
+if [ -f "$STAGE/boot_wvbot" ]; then
+  cp "$STAGE/boot_wvbot" "$HOME_DIR/.termux/boot/wvbot"
+  chmod 700 "$HOME_DIR/.termux/boot/wvbot"
+  echo "boot hook installed"
+fi
+if [ -f "$STAGE/job_watchdog.sh" ]; then
+  cp "$STAGE/job_watchdog.sh" "$HOME_DIR/service/watchdog.sh"
+  chmod 700 "$HOME_DIR/service/watchdog.sh"
+  echo "watchdog installed"
+fi
+
 # 1. the package
 if [ -f "$HOME_DIR/wvbot.zip" ]; then
   echo "unpacking wvbot.zip"
