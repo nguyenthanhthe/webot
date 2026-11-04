@@ -114,6 +114,7 @@ config.json       template (the real one lives in ~/.wv-bot/)
 wvbot/            python side: supervisor, socket.io client, api, dashboard
 web/              node side: playwright runner + the shared payload
 tools/            packaging, deployment, the service scripts and the probes
+tests/            stdlib unittest suite, run from the root (see below)
 docs/RE-NOTES.md  everything that was learned about the protocol
 changelog.md      what changed in which version
 ```
@@ -126,6 +127,18 @@ covers "village win" and "24HR VILL WIN NT (E)".  Rooms with a password
 are skipped - the server refuses the join without it.  Set
 `allow_password_rooms` and `room_password` in the config to try them
 anyway.
+
+## Development
+
+The bot is standard library only, and so are its tests:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+Every protocol fix lands with a test first; the suite covers the payload
+parsing, the XP tables, the game events, the vote policy, the history,
+the pacing and the config load order.
 
 ## The two modes
 

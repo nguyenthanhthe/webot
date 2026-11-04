@@ -42,6 +42,8 @@ ALLOWED_HOSTS = frozenset(
         "game.api-wolvesville.com",
         "game-asia.api-wolvesville.com",
         "api.wolvesville.com",
+        # The website, used to notice a changed client bundle.
+        "www.wolvesville.com",
     }
 )
 

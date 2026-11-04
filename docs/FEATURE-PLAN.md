@@ -38,8 +38,9 @@ This is what keeps the account alive, and it is cheap to build.
 * Occasionally skip a room instead of always taking the first match.
 * Add a small chance of leaving a game early (a human gets bored).
 
-State: the policy already uses `random.SystemRandom`; the timings do not
-exist yet.
+State: **done.**  The delay is drawn from 45-150 s, the day/night votes
+wait a random 3-12 s, a matching room is skipped 15% of the time, and
+the join count per hour backs off on its own.
 
 ### 2. Cooldowns and the ban
 
@@ -50,8 +51,9 @@ We already wait the ban out, but the bot should also:
 * keep a rolling history of joins per hour and back off on its own,
 * never touch the server while banned.
 
-State: the ban is handled (`error-user-banned` -> wait).  The rolling
-join history is missing.
+State: **done.**  The ban end time is read from the profile and the
+error event, the bot sleeps until it lifts, and the rolling join
+window slows itself down past 12 joins/hour.
 
 ### 3. Crash recovery - **partly done**
 
@@ -63,7 +65,8 @@ socket reconnects by itself (`reconnect: "true"`).  What is missing:
 * a heartbeat that notices a silent hang (the socket stays open but the
   game is over).
 
-State: the phone runner supervises; a watchdog timer is missing.
+State: **done.**  The phone runner supervises and a game that sends no
+event for `silence_timeout_sec` is torn down and replaced.
 
 ### 4. Live dashboard - **mostly done**
 
@@ -74,8 +77,8 @@ the error count and the event log.  What RXZBot has that we do not:
 * a session log the user can scroll through,
 * a small control panel (pause, resume, force a room change).
 
-State: the status store is there; the XP rate and the controls are
-missing.
+State: **done.**  The XP rate, the projection and the pause / resume /
+restart controls are on the dashboard, next to the per-player levels.
 
 ### 5. Auto username detection
 
@@ -83,15 +86,17 @@ RXZBot finds the account's display name by itself.  We do not need the
 name: the game id in the handshake identifies the session, and the
 players arrive with their ids.  Nothing to build - but the bot should
 still learn *its own* player id from `game-started` so it can recognise
-itself in the player list.  Currently `GameState.own_id()` returns
-`None` unless somebody sets it.
+itself in the player list.  State: **done** - the own id is learned
+from the profile and from the role the server hands out.
 
 ### 6. One-click rewards
 
 The gold wheel, the rose wheel and the loot boxes live in the core API
 (`core.api-wolvesville.com`).  The bot could claim them on a schedule.
 This is the most work of the list and the least urgent - it does not
-increase the XP rate.
+increase the XP rate.  State: **done** - daily reward, loot boxes, the
+golden wheel (roses capped in the config) and the double XP claim run
+between two games.
 
 ### 7. See hidden levels
 
@@ -99,6 +104,8 @@ The player list in `game-started` does not carry levels, but the
 lobby socket delivers `player-joined-and-equipped-items` with the level
 of every player.  Joining the lobby socket alongside the game socket
 would show the levels.  Nice for the dashboard, no effect on the XP.
+State: **done** - the equipped-items events carry the levels and the
+dashboard lists the whole room.
 
 ### 8. Dual instance
 
@@ -114,17 +121,24 @@ RE notes exist for exactly that.
 
 ## Order of work
 
-1. **Randomised pacing** - the account survives.
-2. **Rolling join history and self-backoff** - the account survives
-   longer.
-3. **Watchdog for a silent hang** - the bot does not sit in a dead game
-   for hours.
-4. **XP rate and projection on the dashboard** - the user can see the
-   value.
-5. **Learn the own player id** - enables the level display and better
-   decisions.
-6. **Dashboard controls** (pause, resume, pick a room) - operation.
-7. **Rewards (wheels, loot boxes)** - optional extra income.
+1. ~~**Randomised pacing**~~ - done.
+2. ~~**Rolling join history and self-backoff**~~ - done.
+3. ~~**Watchdog for a silent hang**~~ - done.
+4. ~~**XP rate and projection on the dashboard**~~ - done.
+5. ~~**Learn the own player id**~~ - done.
+6. ~~**Dashboard controls** (pause, resume, pick a room)~~ - done.
+7. ~~**Rewards (wheels, loot boxes)**~~ - done.
+
+Everything on the list is built.  What could come next, in the order of
+value:
+
+* **The test suite grows with the bot** - every protocol fix lands with
+  a test first (the suite lives in `tests/`, stdlib only).
+* **A second config profile** for a second account (the dual-instance
+  idea without the second session in the same room).
+* **Chat behaviour** - the payload and the event exist, the bot stays
+  silent on purpose for now; if it ever chats, the messages need the
+  same randomised pacing as the votes.
 
 ## What we deliberately do not copy
 

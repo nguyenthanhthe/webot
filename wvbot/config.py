@@ -1,4 +1,4 @@
-"""Configuration for the Wolvesville custom-game farming bot (v0.0.1).
+"""Configuration for the Wolvesville custom-game farming bot.
 
 Config resolution order (later wins):
     1. built-in defaults
@@ -108,8 +108,27 @@ class Config:
     # How many games may be joined per hour before the bot backs off on
     # its own.  The server bans accounts that join too often.
     joins_per_hour: int = 12
+    # A human does not take every room.  This is the chance that a
+    # matching room is left alone this round and the bot looks again
+    # after the normal wait.
+    room_skip_chance: float = 0.15
     request_timeout_sec: float = 20.0
     max_retries: int = 3
+    # How often the account profile is read.  The profile carries the
+    # name, the level and the ban, so it is worth a look now and then.
+    profile_refresh_sec: float = 120.0
+    # How often the game is checked for a patch.
+    update_check_sec: float = 1800.0
+
+    # --- rewards -------------------------------------------------------
+    # The daily reward is free, so it is claimed by default.  The
+    # golden wheel costs roses, so it stays off until asked for.
+    claim_daily_rewards: bool = True
+    # A loot box holds gold, XP or a role card, so it is opened.
+    open_loot_boxes: bool = True
+    spin_golden_wheel: bool = False
+    # How many roses the wheel may cost before the bot refuses to spin.
+    wheel_max_roses: int = 100
 
     # --- dashboard -----------------------------------------------------
     dashboard_host: str = "0.0.0.0"
