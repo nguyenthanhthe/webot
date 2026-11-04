@@ -95,7 +95,10 @@ class SocketIOClient:
             self.ws.send_text("40")
 
         deadline_packets = 0
-        while deadline_packets < 10:
+        # A chatty server may interleave pings and even events before
+        # the namespace ack; the cap only guards against an endless
+        # stream, it is not a small packet count.
+        while deadline_packets < 64:
             raw = self.ws.recv_text()
             if raw is None:
                 raise SocketIOError("connection closed during handshake")

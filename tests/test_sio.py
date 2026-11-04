@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
+import wvbot.sio as sio_module
 from wvbot.sio import SocketIOClient, SocketIOError
 
 
@@ -13,6 +15,9 @@ class FakeSocket:
     def __init__(self, packets):
         self.packets = list(packets)
         self.sent = []
+
+    def connect(self):
+        pass
 
     def recv_text(self):
         if self.packets:
@@ -67,6 +72,31 @@ class HandlePacketTest(unittest.TestCase):
         client = SocketIOClient("https://game.example")
         with self.assertRaises(SocketIOError):
             client.emit("mg:join-open-game", {"miniGameId": 1})
+
+    def test_a_chatty_handshake_still_connects(self):
+        # Pings interleaved before the namespace ack are answered, not
+        # counted against a tiny packet budget.
+        fake = FakeSocket(["0{}"] + ["2"] * 30 + ["40{}"])
+        client = SocketIOClient("https://game.example", auth={"firebaseToken": "t"})
+        with mock.patch.object(sio_module, "WebSocket", return_value=fake):
+            client.connect()
+        self.assertTrue(client.connected)
+        self.assertEqual(fake.sent.count("3"), 30)
+        self.assertTrue(any(p.startswith("40") for p in fake.sent))
+
+    def test_a_rejected_handshake_raises(self):
+        fake = FakeSocket(["0{}", "44{}"])
+        client = SocketIOClient("https://game.example")
+        with mock.patch.object(sio_module, "WebSocket", return_value=fake):
+            with self.assertRaises(SocketIOError):
+                client.connect()
+
+    def test_a_dead_handshake_raises(self):
+        fake = FakeSocket([])
+        client = SocketIOClient("https://game.example")
+        with mock.patch.object(sio_module, "WebSocket", return_value=fake):
+            with self.assertRaises(SocketIOError):
+                client.connect()
 
 
 class DeathPathTest(unittest.TestCase):
