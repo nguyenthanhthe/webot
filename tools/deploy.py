@@ -70,6 +70,7 @@ def main() -> int:
     adb("push", str(ROOT / ZIP), "/data/local/tmp/")
     adb("push", str(ROOT / "tools" / "service_runner.sh"), "/data/local/tmp/")
     adb("push", str(ROOT / "tools" / "bot_ctl.sh"), "/data/local/tmp/")
+    adb("push", str(ROOT / "tools" / "job_watchdog.sh"), "/data/local/tmp/")
     adb("push", str(ROOT / "tools" / "deploy_phone.sh"), "/data/local/tmp/deploy.sh")
 
     print("== installing (the phone's own installer) ==")
