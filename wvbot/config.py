@@ -100,8 +100,6 @@ class Config:
     # a range.  This is what RXZBot calls "human behaviour".
     delay_min_sec: float = 45.0
     delay_max_sec: float = 150.0
-    # Seconds of "play then leave" before recycling into a fresh room.
-    idle_restart_sec: float = 900.0
     # A game that sends no event for this long is treated as hung and
     # restarted.  A normal game sends a chat or vote event every minute.
     silence_timeout_sec: float = 300.0
