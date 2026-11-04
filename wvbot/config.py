@@ -1,4 +1,4 @@
-"""Configuration for the Wolvesville custom-game farming bot (v0.0.1).
+"""Configuration for the Wolvesville custom-game farming bot.
 
 Config resolution order (later wins):
     1. built-in defaults

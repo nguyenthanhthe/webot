@@ -9,6 +9,46 @@ and the project uses [semantic versioning](https://semver.org/).
 
 Planned work, see `docs/FEATURE-PLAN.md` for the full list.
 
+## [0.0.3] - 2026-11-04
+
+The plan from `docs/FEATURE-PLAN.md` is implemented; the account plays
+like a cautious human and the dashboard shows the value.
+
+### Added
+
+- **Rewards.**  The daily reward is claimed between two games, the loot
+  boxes in the inventory are opened, and the golden wheel spins when the
+  config allows the roses.  After the award the bot also claims the
+  double XP when the server offers it.
+- **Player levels.**  The lobby delivers the level of every player with
+  the equipped-items events, so the dashboard lists the room with each
+  player's level and marks the bot's own row.
+- **XP projection.**  The dashboard shows the XP per hour and how long
+  the next level takes, from the session rate and the server's own
+  "xp until next level" figure.
+- **Patch watcher.**  The build number and the client bundle hash are
+  checked now and then; a game patch is logged instead of silently
+  breaking the bot.
+- **The bot knows itself.**  The own player id is learned from the
+  profile, a rename of the account is followed, and a ban end time from
+  the profile is waited out before the bot touches the server again.
+- **Skip a room now and then.**  A matching room is left alone this
+  round with a small chance (default 15%); the bot looks again after
+  the normal wait.  A skipped room does not count towards the hourly
+  join limit.
+- **A test suite.**  94 stdlib tests (`python -m unittest discover -s
+  tests` from `wv-bot/`) cover the payload parsing, the XP tables, the
+  game events, the policy, the history, the pacing and the config.
+
+### Fixed
+
+- A **dead player** could receive the day vote - the accusation counts
+  did not skip dead players, the vote would have been wasted.
+- The room could make the bot **vote for itself**; the counts leave the
+  bot's own id out now.
+- `reset()` kept the **own player id** of the last game.
+- A `gridIdx` of **0** (the first slot) was read as -1.
+
 ## [0.0.2] - 2026-11-04
 
 The bot plays a real game end to end and runs as a background service.

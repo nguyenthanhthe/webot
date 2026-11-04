@@ -100,8 +100,22 @@ wv-bot/
   wvbot/            python side: supervisor, socket.io client, api, dashboard
   web/              node side: playwright runner + the shared payload
   tools/            packaging, deployment, probes and the status helper
+  tests/            stdlib unittest suite, run from wv-bot/ (see below)
   docs/RE-NOTES.md  everything that was learned about the protocol
 ```
+
+## Development
+
+The bot is standard library only, and so are its tests:
+
+```bash
+cd wv-bot
+python -m unittest discover -s tests -v
+```
+
+Every protocol fix lands with a test first; the suite covers the payload
+parsing, the XP tables, the game events, the vote policy, the history,
+the pacing and the config load order.
 
 ## The two modes
 
