@@ -152,6 +152,13 @@ class Bot:
         self._join_times.append(time.time())
         self._joins_in_hour()
 
+    def _skip_room(self) -> bool:
+        """True when this matching room is left alone, as a human would.
+
+        The skipped room does not count as a join for the hourly limit.
+        """
+        return random.SystemRandom().random() < self.cfg.room_skip_chance
+
     # ------------------------------------------------------------------
     # ------------------------------------------------------------------
     # remote control
@@ -289,6 +296,15 @@ class Bot:
         room = random.SystemRandom().choice(rooms)
         room_id = GameApi._room_id(room)
         room_name = GameApi._room_name(room)
+
+        # A human does not take every room: this round is occasionally
+        # left alone entirely.  The skipped room does not count as a
+        # join for the hourly limit.
+        if self._skip_room():
+            self.log_event("lobby", f"leaving room '{room_name}' alone this round")
+            self.store.update(status="waiting for room")
+            return False
+
         self.log_event("lobby", f"joining room '{room_name}' (id={room_id})")
         self.store.update(status="joining", room=room_name)
         self._note_join()

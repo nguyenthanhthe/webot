@@ -108,6 +108,10 @@ class Config:
     # How many games may be joined per hour before the bot backs off on
     # its own.  The server bans accounts that join too often.
     joins_per_hour: int = 12
+    # A human does not take every room.  This is the chance that a
+    # matching room is left alone this round and the bot looks again
+    # after the normal wait.
+    room_skip_chance: float = 0.15
     request_timeout_sec: float = 20.0
     max_retries: int = 3
     # How often the account profile is read.  The profile carries the

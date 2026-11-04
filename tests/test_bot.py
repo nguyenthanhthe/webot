@@ -140,6 +140,29 @@ class PacingTest(unittest.TestCase):
         self.assertEqual(bot._joins_in_hour(), 2)
 
 
+class RoomSkipTest(unittest.TestCase):
+    def _bot(self, chance: float) -> Bot:
+        return shell(
+            cfg=types.SimpleNamespace(room_skip_chance=chance),
+            store=StatusStore(),
+        )
+
+    def test_a_chance_of_zero_never_skips(self) -> None:
+        bot = self._bot(0.0)
+        for _ in range(50):
+            self.assertFalse(bot._skip_room())
+
+    def test_a_chance_of_one_always_skips(self) -> None:
+        bot = self._bot(1.0)
+        for _ in range(50):
+            self.assertTrue(bot._skip_room())
+
+    def test_the_default_chance_stays_rare(self) -> None:
+        from wvbot.config import Config
+
+        self.assertLess(Config().room_skip_chance, 0.5)
+
+
 class ProjectionTest(unittest.TestCase):
     def test_rate_and_hours_to_next_level(self) -> None:
         bot = shell(store=StatusStore())
