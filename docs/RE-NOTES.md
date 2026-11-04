@@ -1,0 +1,187 @@
+# RE notes - Wolvesville (com.werewolfapps.online / wolvesville.com)
+
+Everything below was derived from the shipped clients and from live
+probes.  It is the reference the bot implementation is based on.
+
+## 1. The clients
+
+| Client | What it is | Where it lives |
+|---|---|---|
+| Android app | React Native + **Hermes** bytecode | `assets/index.android.bundle` (magic `c61fbc03c103191f`) |
+| Web client | Same RN app built for the browser | `https://www.wolvesville.com/static/js/main.a3393cef.js` (plain JS, ~6.6 MB) |
+
+The web bundle is the readable one - it is the same code the phone runs,
+uncompiled.  `hbctool` / `hermes-dec` were tried for the Hermes bundle but
+were not needed in the end.
+
+## 2. Hosts
+
+| Host | Purpose |
+|---|---|
+| `auth.api-wolvesville.com` | sign-in, token refresh, Turnstile verification |
+| `core.api-wolvesville.com` | player profile, inventory, rewards (wheel, loot boxes) |
+| `game.api-wolvesville.com` | custom games, game sockets |
+| `game-asia.api-wolvesville.com` | asia routing (alternative) |
+| `api.wolvesville.com` | the public Bot API (68 endpoints, `Authorization: Bot <key>`) |
+
+## 3. Authentication
+
+```
+POST {auth}/players/signInWithEmailAndPassword   {email, password} -> {idToken, refreshToken}
+POST {auth}/players/createIdToken                 {refreshToken}    -> {idToken}
+POST {auth}/cloudflareTurnstile/verify            {token, siteKey, idToken} -> {jwt}
+```
+
+* `signIn` **fails with `403 cloudflare jwt invalid`** unless a valid
+  `Cf-JWT` header is attached - so the first login needs a browser.
+* `createIdToken` (refresh path) needs **no** attestation.  A
+  `refreshToken` is therefore the durable credential: mint idTokens
+  forever, no Turnstile.
+* The web client keeps the session in `localStorage['authtokens']`
+  (`{idToken, refreshToken}`); the firebase web SDK key
+  (`firebase:authUser:<apiKey>:[DEFAULT]`) is the fallback.
+* Turnstile site keys: `0x4AAAAAAATLZS5RyqlMGxsL` (managed),
+  `0x4AAAAAAATLZulAZ6iRPZsU` (visible).
+
+## 4. Cloudflare behaviour (the expensive part)
+
+Cloudflare sits in front of every host and answers **403** to clients that
+do not look like a browser.  Measured on this machine:
+
+| Client | Result |
+|---|---|
+| Windows Python (OpenSSL), Chrome UA | **403** |
+| Windows `curl` (Schannel), no UA | **403** |
+| Windows `curl` (Schannel), Chrome UA | **401** (= reached the API) |
+| Termux `curl` 8.12 (OpenSSL 3.4), Chrome UA | **403** |
+| Termux `curl` 8.12, `--tls-max 1.2` | **401** |
+| **Termux Python 3.14 (OpenSSL 3.4)** | **401** |
+| Real browser (Chrome / Firefox) | works |
+
+Rules that were derived:
+
+1. A **browser `User-Agent`** is mandatory - `curl/8.x` gets 403.
+2. The **TLS fingerprint** matters as well: on Windows only the
+   Schannel-based `curl` passed; OpenSSL-based Python did not.
+3. On Termux, `curl` with **TLS 1.3** is blocked but **TLS 1.2** passes;
+   Termux Python passes with either.
+4. Conclusion: **do not fight it - use a real browser.**  The browser
+   handles Cloudflare, the Turnstile widget and the login, and the bot
+   logic runs inside the page.
+
+## 5. Socket.io protocol
+
+Engine.IO v4 / socket.io v4, websocket-only, path `/socket.io/`.
+
+```
+query = {firebaseToken, gameId, ids: 1, apiV: 1, EIO: 4, reconnect: "true", "Cf-JWT": ...}
+auth  = {firebaseToken}
+transports = ["websocket"]
+```
+
+The game id and the game server URL arrive with `game-joined`; the values
+of that payload are `[gameId, serverUrl]`.
+
+### Server -> client
+
+| Event | Payload |
+|---|---|
+| `game-settings-changed` | `{gameMode, allCoupled, ...}` |
+| `game-started` | `{role: <roleId>, players: [...]}` |
+| `game-cupid-lover-ids-and-roles` | `{loverPlayerIds: [], loverRoles: []}` |
+| `game-werewolves-set-roles` | `{werewolves: {playerId: roleId}}` |
+| `game-players-killed` | `{victims: [{targetPlayerId, targetPlayerRole, cause}]}` |
+| `game-night-started` / `game-day-voting-started` | - |
+| `game-werewolves-vote-set` | `{playerId, targetPlayerId}` |
+| `game-day-vote-set` | `{targetPlayerId, playerId}` |
+| `game:chat-public:msg` / `game:chat-werewolves:msg` | `{authorId, msg}` |
+| `game-reconnect-set-players` | `{playerId: {isAlive, ...}}` |
+| `game-over-awards-available` | `{playerAward: {awardedTotalXp, awardedLevels, canClaimDoubleXp}}` |
+
+### Client -> server
+
+| Event | Payload |
+|---|---|
+| `mg:join-open-game` | `{miniGameId}` (lobby socket) |
+| `game-day-vote-set` | **JSON string** `{targetPlayerId}` |
+| `game-vote-to-skip` | - |
+| `game-werewolves-vote-set` | **JSON string** `{targetPlayerId}` |
+| `game-priest-kill-player` / `game-vigilante-shoot` / `game-gunner-shoot-player` | **JSON string** `{targetPlayerId}` |
+| `game-junior-werewolf-selected-player` | **JSON string** `{targetPlayerId}` |
+| `game:chat-public:msg` / `game:chat-werewolves:msg` | **JSON string** `{msg}` |
+| `videoAdClaimReward` | **plain object** `{adId: "DOUBLE_XP", type: "XP_DOUBLER"}` |
+| `game-over-double-xp` | - |
+
+> Every game action is sent as a **JSON string** - only the ad reward
+> event takes a plain object.  This is what the official client does and
+> the server expects.
+
+### Role metadata
+
+`localStorage['roles-meta-data'].roles[roleId]` -> `{id, name, team}`
+with `team` being `VILLAGER` or `WEREWOLF`.
+
+### REST
+
+```
+GET {game}/api/public/game/custom?language=en          -> {openGames: [...]}
+GET {game}/api/public/game/custom/settings?gameId=..&locale=en
+GET {game}/api/public/game/customGames/checkPasswordPresence?gameId=..
+GET {core}/players/meAndCheckAppVersion
+```
+
+## 6. What the official bot (Zoro) does - and where it is wrong
+
+`D:\Users\Admin\Downloads\Zoro bot\Zoro bot` is a Chrome extension that
+injects a socket.io client into the page and plays custom games:
+
+* it hooks `MessageEvent.prototype.data` to read the page's own frames
+  (that is how it learns `gameId`/`serverUrl`),
+* it opens a **parallel socket.io session** with the page's firebase token,
+* it votes, kills, chats (`me`, `wc`, `solo`, `Who?`) and claims double XP,
+* it re-enters by *clicking* "Play again" / "Continue" in the DOM,
+* it blocks the site's automation probes (`/players/webBo...`,
+  `/players/webAutomatio...`) and fakes `/api/public/game/running`.
+
+Worth copying: the parallel socket, the JSON-string payloads, the
+automation-probe blocking, the double-XP claim.
+
+Worth fixing (its bugs): a wolf without a lover never votes at all, the
+villager only votes after a chat keyword appears, the lovers array is
+misaligned, `PLAYER.ID` vs `PLAYER.id` guards are no-ops, the socket is
+never re-created on disconnect and the "Play again" poller multiplies.
+
+## 7. The Android app (native client)
+
+* Package `com.werewolfapps.online`, sideloaded XAPK (arm64 split).
+* The UI is React Native, so `uiautomator` shows real text: room cards
+  (`"Vill Win -TF- (E), MrNuii, , 7"`), the room modal with the
+  **"Kết nối lại"** button, players as `"<number> <name>"`, and the
+  game-over screen with **"Tiếp tục"**.
+* A UI-driven bot is easy to write - and impossible to run headless: the
+  screen has to stay on, which is a dealbreaker for a 24/7 bot.
+* Useful anyway: it proves which rooms exist ("vill win" rooms are
+  visible in the app even with a Vietnamese UI).
+
+## 8. Device notes (Samsung Galaxy A03s, Termux)
+
+* `run-as com.termux` has **no network** (SELinux): socket creation
+  fails with EPERM.  The Termux *app session* has network.
+* Android hands Termux a dead nameserver when Tailscale is up
+  (`192.168.1.57`); the router (`192.168.1.1`) works.  `wvbot/netfix.py`
+  probes candidates and writes the first that answers.
+* The installed Termux packages were built against a **newer libc++** than
+  the installed one, so `adb` and `firefox` failed with
+  `_ZNSt6__ndk113__hash_memoryEPKvm`.  `apt install --only-upgrade libc++`
+  (27c -> 30) fixed both.
+* Headless Firefox with Marionette works in Termux and passes Cloudflare:
+  that is what the phone-side runner uses.
+
+## 9. Alternatives that were tried and rejected
+
+| Idea | Why it was dropped |
+|---|---|
+| Pure protocol bot in Python on the phone | needs a `Cf-JWT` for the first sign-in; Turnstile needs a browser.  Kept as `run.py --mode protocol` for a machine with a valid token. |
+| UI-click bot on the native app | the screen must stay on -> not headless, not 24/7 |
+| TLS-impersonating client (`curl-impersonate`) | unnecessary: the phone's own browser already passes |
+| Docker | not installed on the laptop; the plain runner is simpler.  A Dockerfile is provided for people who want it. |

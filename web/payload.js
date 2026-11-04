@@ -112,9 +112,15 @@
   }
 
   const recentEvents = [];
+  let lastEventKey = "";
 
   function reportEvent(level, message) {
     const entry = { t: Date.now(), level, message: String(message).slice(0, 300) };
+    // The same message over and over (for example "not logged in yet")
+    // would only flood the dashboard.
+    const key = `${level}|${entry.message}`;
+    if (key === lastEventKey) return;
+    lastEventKey = key;
     recentEvents.push(entry);
     if (recentEvents.length > 200) recentEvents.shift();
     post({ kind: "event", level, message: entry.message });
