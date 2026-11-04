@@ -305,3 +305,30 @@ never re-created on disconnect and the "Play again" poller multiplies.
 | UI-click bot on the native app | the screen must stay on -> not headless, not 24/7 |
 | TLS-impersonating client (`curl-impersonate`) | unnecessary: the phone's own browser already passes |
 | Docker | not installed on the laptop; the plain runner is simpler.  A Dockerfile is provided for people who want it. |
+
+## When the game is patched - the runbook
+
+The bot notices a patch by itself: the update watcher polls the build
+number (`appVersions/check`) and the client bundle hash
+(`www.wolvesville.com/static/js/main.<hash>.js`) every 30 minutes and
+logs "the game was patched" when either moves.  What the operator does
+then:
+
+1. **Download the new bundle** (the URL is in the watcher's log line -
+   the hash part changes) and grep it for every event name this bot
+   uses: `mg:join-open-game`, `mg:exit-game`, `game-day-vote-set`,
+   `game-werewolves-vote-set`, `game-vote-to-skip`,
+   `game-over-awards-available`, `videoAdClaimReward`.  A renamed emit
+   is the usual breakage.
+2. **Diff the handshake query** (`firebaseToken`, `ids`, `apiV`, `b`,
+   `deviceId`) against `wvbot/bot.py::_play_game` - a new field here
+   answers `error-game-connection-lost` on every join.
+3. **Fix the code + the tests together** (`tests/` covers the payload
+   parsing and every event), run `python -m unittest discover -s
+   tests`, deploy with `python wv-bot/tools/deploy.py`.
+4. **The room list fields** (`regularXp` is a boolean flag) live in
+   `docs/RE-NOTES.md` - re-measure them with the `/api/rooms` gateway
+   if the room list shape changed.
+
+Historically, patches moved the bundle hash more often than the
+protocol itself; most patches change nothing for the bot.
