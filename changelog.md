@@ -38,6 +38,13 @@ The bot plays a real game end to end and runs as a background service.
 
 ### Fixed
 
+- The bot acts **once per phase**.  The server repeats the day vote for
+  every player that votes, so the killer role shot its victim fourteen
+  times in half a minute.  The same happened to the werewolf vote, the
+  protection and the day vote.
+- Leaving a room is announced with `mg:exit-game`.  A socket that
+  simply disappears counts as "fleeing the village" and the server bans
+  the account for it.
 - A server error (`error-*`) ends the game session right away instead of
   waiting for the silence timeout.  The bot used to sit in a dead game
   for five minutes.
