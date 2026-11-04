@@ -519,6 +519,7 @@ class Bot:
                 phase=self.state.phase,
                 levels=self._player_levels(),
             )
+            self._maybe_chat(sock)
             self._night_action(sock)
             self._protector_action(sock)
         elif event in ("game-night-started", "game-werewolves-vote-set"):
@@ -851,6 +852,21 @@ class Bot:
 
     # The official client sends every game payload as a JSON *string*;
     # only the ad reward takes a plain object.
+    def _maybe_chat(self, sock: SocketIOClient) -> None:
+        """A greeting now and then, like a human joining a room.
+
+        Off unless the config asks for it: an unsolicited message can
+        annoy a room, and a kick costs the same as a flee.
+        """
+        if not self.cfg.chat_enabled or not self.cfg.chat_messages:
+            return
+        if random.SystemRandom().random() > 0.3:
+            return
+        message = random.SystemRandom().choice(list(self.cfg.chat_messages))
+        self._hesitate(5.0, 25.0)
+        self.chat(sock, message)
+        self.log_event("chat", f"said: {message}")
+
     def _hesitate(self, low: float = 3.0, high: float = 12.0) -> None:
         """Wait a random moment before acting.
 
