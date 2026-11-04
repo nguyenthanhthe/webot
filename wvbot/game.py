@@ -105,10 +105,17 @@ class Player:
             level = int(raw.get("level") or 0)
         except (TypeError, ValueError):
             level = 0
+        # The grid index can legitimately be 0 (the first slot), so the
+        # default has to be told apart from a real zero here.
+        grid_raw = raw.get("gridIdx", raw.get("gridIndex", -1))
+        try:
+            grid_idx = int(grid_raw)
+        except (TypeError, ValueError):
+            grid_idx = -1
         return cls(
             id=pid,
             username=str(raw.get("username") or raw.get("name") or ""),
-            grid_idx=int(raw.get("gridIdx", raw.get("gridIndex", -1)) or -1),
+            grid_idx=grid_idx,
             is_alive=bool(raw.get("isAlive", True)),
             role=str(role_id),
             team=str(team),
@@ -165,6 +172,9 @@ class GameState:
         self.night_votes = {}
         self.messages = []
         self.last_award = {}
+        # A new game is a new player list; the old own id must not leak
+        # into it.
+        self._own_id = None
 
     # -- ingest --------------------------------------------------------
     def apply(self, event: str, raw: Any) -> None:
@@ -355,6 +365,13 @@ class Policy:
 
     # -- voting --------------------------------------------------------
     def _accusation_counts(self, state: GameState) -> dict[Any, int]:
+        """How often each *living* player was accused.
+
+        Dead players are left out: voting for one would waste the vote,
+        and the night policy only wants to know who is quietly alive.
+        The bot itself is left out too - a room that accuses the bot
+        must not make it vote for itself.
+        """
         counts: dict[Any, int] = {}
         for message in state.messages:
             if not isinstance(message, dict):
@@ -364,7 +381,9 @@ class Policy:
             if not any(word in lowered for word in ("wolf", "sus", "vote", "susp", "werewolf")):
                 continue
             author = message.get("authorId")
-            for player in state.players:
+            for player in state.alive:
+                if player.id == author or player.id == state.own_id():
+                    continue
                 if player.id == author:
                     continue
                 if player.username and player.username.lower() in lowered:
