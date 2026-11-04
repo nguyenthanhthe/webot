@@ -477,6 +477,23 @@ class JoinBudgetTest(unittest.TestCase):
         self.assertTrue(bot._join_budget_left())
 
 
+class AliveCountTest(unittest.TestCase):
+    def test_the_alive_count_shrinks_with_the_kills(self) -> None:
+        from wvbot.game import GameState
+
+        state = GameState()
+        state.apply(
+            "game-started",
+            {"players": [{"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}]},
+        )
+        bot = shell(state=state, store=StatusStore())
+        bot._update_alive()
+        self.assertEqual(bot.store.get().get("alive"), 4)
+        state.apply("game-players-killed", [2, 3])
+        bot._update_alive()
+        self.assertEqual(bot.store.get().get("alive"), 2)
+
+
 class ProjectionTest(unittest.TestCase):
     def test_rate_and_hours_to_next_level(self) -> None:
         bot = shell(store=StatusStore())
