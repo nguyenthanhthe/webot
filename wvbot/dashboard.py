@@ -175,7 +175,7 @@ async function refresh() {
     ['xp / hour', rate, ''],
     ['xp last game', st.xp_last, ''],
     ['games', st.games_played, ''],
-    ['wins', st.wins, 'ok'],
+    ['games total', st.games_finished, ''],
     ['reconnects', st.reconnects, st.reconnects ? 'warn' : ''],
     ['errors', st.errors, st.errors ? 'bad' : ''],
     ...(st.banned_until ? [['banned until', st.banned_until, 'bad']] : []),

@@ -158,8 +158,15 @@ in the config turns them back on, `room_password` sends the password).
 | `game-day-vote-set` | `{targetPlayerId, playerId}` |
 | `game:chat-public:msg` / `game:chat-werewolves:msg` | `{authorId, msg}` |
 | `game-reconnect-set-players` | `{playerId: {isAlive, ...}}` |
-| `game-over-awards-available` | `{playerAward: {awardedTotalXp, awardedLevels, canClaimDoubleXp}}` |
+| `game-over-awards-available` | `{playerAward: {awardedTotalXp, awardedLevels, awardedXp: [{reason: GAME_FINISHED|CONSECUTIVE_GAMES, xp, clanQuestXp, battlePassXp}], awardedInventoryRewards, awardedLootBoxes, canClaimDoubleXp, battlePassRewards, ...}}` |
 | `error-user-banned` | `{bannedUntilTime, banReason, banReasonMsg}` |
+
+The `awardedXp` reasons seen live: `GAME_FINISHED` (the base pay) and
+`CONSECUTIVE_GAMES` (a streak bonus for playing back to back within a
+window).  The full payload is ~660 characters and ends at
+`inAppReviewEligible` - **it carries no win flag**, so a "wins"
+counter has no data source in the observed protocol; the dashboard
+does not show one.
 
 ### Client -> server
 

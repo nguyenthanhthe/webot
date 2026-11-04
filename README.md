@@ -140,6 +140,23 @@ Every protocol fix lands with a test first; the suite covers the payload
 parsing, the XP tables, the game events, the vote policy, the history,
 the pacing and the config load order.
 
+## Configuration (the live one sits in `~/.wv-bot/config.json` on the phone)
+
+| Key | Default | Meaning |
+|---|---|---|
+| `room_names` | `["vill win"]` | word-matched against the room list |
+| `delay_min_sec` / `delay_max_sec` | 45 / 150 | the wait between two games, drawn at random |
+| `joins_per_hour` | 12 | past this the bot waits 5 extra minutes per round |
+| `room_skip_chance` | 0.15 | chance to leave a matching room alone this round |
+| `daily_restart_hour` | 4 | the process re-executes itself at this local hour (`null` = off) |
+| `silence_timeout_sec` | 300 | a game with no events for this long is restarted |
+| `allow_password_rooms` / `room_password` | false / "" | join locked rooms (when they share one password) |
+| `claim_daily_rewards` | true | the daily ladder rung whose date has arrived |
+| `open_loot_boxes` | true | open the loot boxes between games |
+| `spin_golden_wheel` | false | spin the wheel when it costs at most `wheel_max_roses` |
+| `chat_enabled` / `chat_messages` | false / [] | the optional greeting (30% chance per game) |
+| `dashboard_host` / `dashboard_port` | 0.0.0.0 / 8787 | where the status panel listens |
+
 ## The two modes
 
 | Mode | Command | Needs |
