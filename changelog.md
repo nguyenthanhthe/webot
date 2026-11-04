@@ -54,6 +54,10 @@ like a cautious human and the dashboard shows the value.
   `mg:exit-game` before the socket closes.
 - A refused **daily reward claim** was logged as a success; the log
   carries the server's answer now.
+- A **dead game socket** left the session hanging until the silence
+  watchdog (300 s): the reader thread swallowed packet errors and the
+  "disconnect" handler was dead code.  It dispatches now, and a broken
+  packet ends the session the same way.
 - The dashboard **phase card** stayed on "started" after the first
   phase change; it follows the night and the day vote now.
 
