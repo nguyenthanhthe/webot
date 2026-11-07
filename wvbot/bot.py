@@ -298,7 +298,7 @@ class Bot:
             self.store.update(status="running")
 
     def _pick_room(self, rooms: list[dict[str, Any]]) -> dict[str, Any] | None:
-        """Choose a room, preferring the fast-rotating 8-player ones.
+        """Choose a room, strictly prioritizing 8-player rooms over 16-player rooms.
 
         Vill-win rooms pay full XP regardless of size, but an 8-player
         room turns around in 30-60 seconds compared to 4-5 minutes for
@@ -307,8 +307,6 @@ class Bot:
         """
         if not rooms:
             return None
-        if len(rooms) == 1:
-            return rooms[0]
 
         def xp(room: dict[str, Any]) -> int:
             value = room.get("regularXp")
@@ -319,12 +317,6 @@ class Bot:
             except (TypeError, ValueError):
                 return 0
 
-        best = max(xp(room) for room in rooms)
-        if best <= 0:
-            top = list(rooms)
-        else:
-            top = [room for room in rooms if xp(room) >= best * 0.8]
-
         def size(room: dict[str, Any]) -> int:
             try:
                 return int(room.get("playerCount") or 0)
@@ -332,34 +324,72 @@ class Bot:
                 return 99
 
         def is_8p_room(room: dict[str, Any]) -> bool:
-            name = GameApi._room_name(room).lower()
-            max_p = 0
+            # 1. If current count is already > 8, it cannot be an 8p room
+            if size(room) > 8:
+                return False
+
+            # 2. Check if maxPlayerCount is already known
             for key in ("maxPlayerCount", "maxPlayers", "playerLimit"):
-                if key in room:
+                if key in room and room[key]:
                     try:
-                        max_p = int(room[key] or 0)
-                        break
+                        return int(room[key]) <= 8
                     except (TypeError, ValueError):
                         pass
+
+            # 3. Query room settings via REST API (Wolvesville holds maxPlayerCount in settings)
+            room_id = GameApi._room_id(room)
+            if room_id and hasattr(self, "api") and hasattr(self.api, "get_game_settings"):
+                try:
+                    settings = self.api.get_game_settings(room_id)
+                    if isinstance(settings, dict) and "maxPlayerCount" in settings:
+                        max_p = int(settings["maxPlayerCount"] or 0)
+                        room["maxPlayerCount"] = max_p
+                        return 0 < max_p <= 8
+                except Exception as exc:
+                    log.debug("could not fetch settings for room %s: %s", room_id, exc)
+
+            # 4. Check name heuristics for explicit 8p markers
+            name = GameApi._room_name(room).lower()
+            if any(k in name for k in ("8p", "8 p", "8-p", " 8 ", "8player", "8 player", "vw8")):
+                return True
+
+            # 5. Check role deck count: if explicitly <= 8 roles
             roles = room.get("roles")
             roles_count = len(roles) if isinstance(roles, list) else 0
-            if 0 < max_p <= 8:
-                return True
             if 0 < roles_count <= 8:
                 return True
-            if any(k in name for k in ("8p", "8 p", "8-p", " 8 ", "8player", "vw8")):
-                return True
+
             return False
 
-        if getattr(self.cfg, "prefer_8p_rooms", True):
-            eight_p = [r for r in top if is_8p_room(r)]
-            if eight_p:
-                top = eight_p
+        # If prefer_8p_rooms is explicitly enabled, enforce strict 8p matching
+        if getattr(self.cfg, "prefer_8p_rooms", False):
+            eight_p = [r for r in rooms if is_8p_room(r)]
+            if not eight_p:
+                self.log_event("lobby", f"no 8-player room open (skipped {len(rooms)} non-8p room(s)), waiting...")
+                return None
+            candidates = eight_p
+        else:
+            candidates = list(rooms)
 
-        if not self.cfg.prefer_small_rooms:
+        if len(candidates) == 1:
+            return candidates[0]
+
+        best = max(xp(room) for room in candidates)
+        if best <= 0:
+            top = list(candidates)
+        else:
+            top = [room for room in candidates if xp(room) >= best * 0.8]
+
+        if not getattr(self.cfg, "prefer_small_rooms", True):
             return random.SystemRandom().choice(top)
 
-        # In 8p rooms, 4-7 players means the room is about to start
+        # In 8p rooms, prefer the most filled room (closest to starting at 8, e.g. 5-7 players)
+        if getattr(self.cfg, "prefer_8p_rooms", False):
+            viable = [room for room in top if size(room) >= 4] or top
+            viable.sort(key=lambda r: size(r), reverse=True)
+            return viable[0]
+
+        # Legacy fallback when prefer_8p_rooms is not enabled
         viable = [room for room in top if size(room) >= 4] or top
         smallest = min(size(room) for room in viable)
         small = [room for room in viable if size(room) <= smallest + 3]

@@ -126,6 +126,8 @@ class GameApi:
     def _matches(name: str, wanted: list[str], tokens: list[str] | None = None) -> bool:
         """True when the room name carries any of the wanted patterns."""
         for target in wanted:
+            if target in ("*", "all", "any"):
+                return True
             if target in name:
                 return True
             target_tokens = target.split()

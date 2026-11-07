@@ -23,7 +23,7 @@
       authHost: "https://auth.api-wolvesville.com",
       // The durable credential: it can mint new idTokens without a browser.
       refreshToken: null,
-      roomNames: ["vill win"],
+      roomNames: ["vill win", "say m", "ww say", "8p", "tf", "farm", "quick", "fast", "xp", "vw8"],
       language: "en",
       gameMode: "custom",
       requireAllCoupled: true,
