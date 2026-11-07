@@ -9,6 +9,45 @@ and the project uses [semantic versioning](https://semver.org/).
 
 Planned work, see `docs/FEATURE-PLAN.md` for the full list.
 
+## [1.0.2] - 2026-11-07
+
+Multi-Account Hot-Roster REST API and Real-Time Accounts UI.
+
+### Added
+
+- **Multi-Account Hot-Roster REST API**:
+  - `GET /api/accounts`: Secure enumeration of accounts with token readiness probe (`ready: bool`, `has_token: bool`) without exposing credentials.
+  - `POST /api/accounts`: Dynamic hot-registration of accounts, auto-creating directory structures and hot-launching bot slots into running Farm.
+  - `DELETE /api/accounts/<name>`: Graceful bot thread termination, slot release, and roster removal.
+  - Safe Roster Cleanup: When removing the last account, unlinks `accounts.json` cleanly restoring single-account fallback without triggering `RosterError`.
+- **Interactive Farm Roster Dashboard UI**:
+  - Real-time accounts manager with status badges (`Ready`, `Missing Token`, `Running`, `Inactive`).
+  - Modal form for adding bot accounts directly from browser.
+  - 1-click account removal with instant farm refresh.
+- **Concurrency & Thread-Safety Hardening**:
+  - All Farm slot iterations utilize `list(self._slots)` to eliminate race conditions during hot-adds and removals.
+
+## [1.0.1] - 2026-11-07
+
+Network resilience, protocol serialization fix, and multi-mode watchdog.
+
+### Added
+
+- **Network Blip Fast Reconnect**:
+  - Automatically handles unexpected mid-game socket disconnects via `fast_reconnect_max_attempts` and exponential backoff.
+  - Emits `mg:join-open-game` with original `miniGameId`, syncing game state via `game-reconnect-set-players` without forfeiting match or accumulating leave penalties.
+- **Continuous Heartbeat in Match Loop**:
+  - Calls `_touch_heartbeat()` every 30s during gameplay to prevent watchdog false positives on long matches.
+- **Watchdog Drill Tool (`tools/drill_watchdog.py`)**:
+  - Inspects heartbeat age, service runner lock, and log rotation via Termux environment.
+
+### Fixed
+
+- **Chat Payload Wire Format**:
+  - Serializes `chat()` payload as JSON string (`json.dumps({"msg": message})`) conforming to official Wolvesville socket protocol.
+- **Service Watchdog Multi-Mode Pattern**:
+  - Updated regex/grep patterns in `job_watchdog.sh`, `service_runner.sh`, and `bot_ctl.sh` to match `farm`, `protocol`, and `-m wvbot` modes uniformly.
+
 ## [1.0.0] - 2026-11-07
 
 The Enterprise release: from a single bot to a multi-account autonomous farm.

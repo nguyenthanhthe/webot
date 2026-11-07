@@ -1,168 +1,143 @@
-# Wolvesville bot
+# Wolvesville Enterprise Bot Farm (v1.0.2)
 
-A bot that plays Wolvesville custom games ("vill win" rooms) on its own,
-24/7, headless - and a dashboard that shows what it is doing.
+An autonomous, multi-account, headless farming cluster for Wolvesville custom games ("vill win" rooms) with 24/7 reliability, real-time SSE dashboard, and hot-roster management.
 
-The bot speaks to the game server **directly**: it mints its own firebase
-token from a refresh token, lists the open rooms over REST and plays over
-socket.io.  No browser, no screen, no clicking - just the Python standard
-library, so it runs happily inside Termux on a phone.
+The bot communicates directly with Wolvesville servers over REST and Socket.IO. It mints its own Firebase tokens from stored refresh tokens, queries room lobbies, and plays matches autonomously with randomized human-like pacing.
+
+**100% Python Standard Library** — zero pip dependencies, zero browser overhead in protocol mode. Runs seamlessly inside Termux on an Android device or inside a minimal Docker container.
 
 ```
-┌──────────────┐   REST + socket.io   ┌──────────────────────┐
-│ wvbot        │─────────────────────▶│ game.api-wolvesville │
-│ (python)     │◀─────────────────────│                      │
-└──────┬───────┘                      └──────────────────────┘
-       │ state / events
-       ▼
-┌──────────────┐                      ┌──────────────────────┐
-│ dashboard    │─────────────────────▶│ laptop browser       │
-│ :8787        │                      │ (adb forward)        │
-└──────────────┘                      └──────────────────────┘
+┌───────────────────────────────── Termux / Docker ─────────────────────────────────┐
+│                                                                                   │
+│  Farm Supervisor (wvbot.farm)                                                     │
+│   ├── accounts.json          Roster configuration (mode 600)                      │
+│   ├── Bot #1 (thread) ────┐                                                      │
+│   ├── Bot #2 (thread) ────┼── Independent state dirs (~/.wv-bot/accounts/<name>/) │
+│   └── Bot #N (thread) ────┘   Independent sockets, pacing, and crash backoffs      │
+│                                                                                   │
+│  Live Dashboard & REST API (:8787)                                                │
+│   ├── GET  /              Live Web UI (SSE Stream + Roster Manager + Bot Grid)    │
+│   ├── GET  /api/status    Active bot state snapshot                              │
+│   ├── GET  /api/farm      All bot instances snapshot                              │
+│   ├── GET  /api/stream    Server-Sent Events (SSE) live push                      │
+│   ├── GET  /api/accounts  Sanitized account enumeration & readiness probe         │
+│   ├── POST /api/accounts  Hot-add bot account & launch slot dynamically           │
+│   └── DEL  /api/accounts  Graceful bot slot termination & roster cleanup          │
+└─────────────────────────────────────────┬─────────────────────────────────────────┘
+                                          │
+                  ┌───────────────────────┴───────────────────────┐
+                  ▼                                               ▼
+     ┌────────────────────────┐                      ┌────────────────────────┐
+     │ game.api-wolvesville   │                      │ Laptop / Phone Browser │
+     │ (REST + Socket.IO)     │                      │ (Tailscale / Port 8787)│
+     └────────────────────────┘                      └────────────────────────┘
 ```
 
-## The one thing that needs a browser
+---
 
-Only the **first login**.  The sign-in endpoint wants a Cloudflare
-attestation that only a real browser can produce.  Once you have logged
-in once, the `refreshToken` is the durable credential: it mints new
-idTokens for as long as it lives, and nothing else needs a browser.
+## Key Features
+
+- **Multi-Account Autonomous Farm:** Run multiple bot accounts in isolated threads with dedicated state directories, independent pacing, and individual ban cooldowns.
+- **Hot-Roster Management:** Dynamically add or remove bot accounts via Web Dashboard UI, REST API (`/api/accounts`), or CLI (`tools/roster.py`) without restarting the cluster.
+- **Fast Network Reconnect:** Automatically recovers from socket drops mid-game without abandoning the match or accumulating leave countdown penalties.
+- **Human Pacing & Ban Avoidance:** Random day/night delays (45–150s), room skip probabilities, and rolling join rate limiters.
+- **Real-Time Live Dashboard:** Built-in web UI served on `:8787` with real-time SSE updates, per-bot status cards, room player levels, event stream, and 1-click reward claims (Daily Rewards, Lootboxes, Golden Wheel).
+- **Process Watchdog & Auto-Healing:** Background cron + service runner checks heartbeat age, locks process PID, rotates logs in place, and revives failed bots automatically.
+- **Zero-Dependency Docker Container:** Containerized with `python:3.12-slim` and built-in healthchecks.
+
+---
+
+## Quickstart
+
+### 1. First Login & Token Retrieval
+Wolvesville sign-in requires an initial Cloudflare attestation. Retrieve your durable `refreshToken` once using the local helper:
 
 ```bash
 cd web
 npm install
-node login.mjs            # opens a visible browser - you log in there
+node login.mjs            # Log in once via visible browser window
 ```
+The script writes the token to `web/state/` and displays it.
 
-`login.mjs` stores the session in `web/state/` and prints the refresh
-token.  Copy it to the phone (see below); from then on the phone runs
-completely on its own.
-
-## Run it on the phone (the mini PC)
-
-The bot runs as an **Android background service**, not as a Termux tab:
-closing every terminal window leaves it running.
+### 2. Run with Docker Compose
 
 ```bash
-# on the phone, inside Termux
-sh ~/deploy.sh             # unpack the package, store the refresh token
-sh ~/bot_ctl.sh start      # start the service
+docker compose up -d
 ```
+The dashboard is immediately accessible at `http://localhost:8787/`.
 
-| Command | What it does |
-|---|---|
-| `sh ~/bot_ctl.sh start` | start the bot service |
-| `sh ~/bot_ctl.sh stop` | stop it |
-| `sh ~/bot_ctl.sh restart` | stop and start again |
-| `sh ~/bot_ctl.sh status` | is it running, and what is in the log |
-
-* The service is the Termux background service
-  (`com.termux/.app.RunCommandService`), so it outlives every session.
-* `~/.termux/boot/wvbot` starts it again after a reboot (`Termux:Boot`).
-* A JobScheduler watchdog restarts it every 15 minutes if the system
-  killed the Termux app (`termux-job-scheduler`).
-* The bot keeps the CPU awake (`termux-wake-lock`) and the Termux
-  packages are whitelisted from doze.
-* The dashboard is on port 8787 of the phone.  From the laptop:
+### 3. Run on Android Phone (Termux Mini-PC)
 
 ```bash
-adb forward tcp:8787 tcp:8787     # then open http://127.0.0.1:8787/
+# Deploy package to device
+python wv-bot/tools/deploy.py
+
+# Forward dashboard port to laptop
+adb forward tcp:8787 tcp:8787
+```
+Open `http://127.0.0.1:8787/` on your laptop browser.
+
+---
+
+## Managing Accounts (Hot-Roster)
+
+### Via Web Dashboard UI
+1. Open `http://127.0.0.1:8787/`.
+2. In the **📋 Farm Roster & Accounts** section, click `+ Add Bot`.
+3. Enter an account name and paste the `refreshToken`.
+4. The bot will automatically initialize and join the active farm cluster.
+
+### Via CLI (`tools/roster.py`)
+```bash
+# List all configured accounts and readiness
+python wv-bot/tools/roster.py list
+
+# Add a new account
+python wv-bot/tools/roster.py add bot2 "<refresh_token>"
+
+# Remove an account
+python wv-bot/tools/roster.py remove bot2
+
+# Check overall farm status
+python wv-bot/tools/roster.py status
 ```
 
-or open `http://<phone-ip>:8787/` directly on the same Wi-Fi.
+### Via REST API
+- `GET /api/accounts` — Returns accounts list and readiness status (`ready: true`, credentials redacted).
+- `POST /api/accounts` — Payload `{"name": "bot2", "refresh_token": "..."}`.
+- `DELETE /api/accounts/bot2` — Gracefully stops slot and removes from roster.
 
-## Check what it is doing
+---
+
+## Testing & Quality Assurance
+
+The test suite relies exclusively on the Python standard library:
 
 ```bash
-python tools/status.py --events
-```
-
-Prints status, phase, room, role, XP, restarts, errors, the processes on
-the phone and the last events.  The same numbers are on the dashboard.
-
-| Field | Meaning |
-|---|---|
-| `status` | `waiting for login` -> `looking for room` -> `joining` -> `playing` -> `game-over` -> `reconnecting` |
-| `errors` / `reconnects` | both should stay flat while things are fine |
-| `uptime_sec` | how long the current session has been running |
-| `xp_total` / `games_played` | the harvest |
-| `banned` | the server banned the account; the bot waits the ban out |
-
-## The other host: a browser
-
-The original design drove the official web client in a headless Firefox
-and injected a script into the page.  That still exists and is useful
-when the protocol mode runs into a Cloudflare challenge:
-
-```bash
-cd web
-npm install && npx playwright install chromium
-node bot.mjs --login     # log in once in a visible browser
-node bot.mjs             # run headless
-node bot.mjs --headed    # run with a visible browser (debugging)
-```
-
-Both runners inject the same `web/payload.js`, so the behaviour is
-identical.
-
-## Layout
-
-```
-run.py            launcher for the phone (protocol mode by default)
-setcreds.py       stores the account credentials on the device (mode 600)
-config.json       template (the real one lives in ~/.wv-bot/)
-wvbot/            python side: supervisor, socket.io client, api, dashboard
-web/              node side: playwright runner + the shared payload
-tools/            packaging, deployment, the service scripts and the probes
-tests/            stdlib unittest suite, run from the root (see below)
-docs/RE-NOTES.md  everything that was learned about the protocol
-changelog.md      what changed in which version
-```
-
-## The rooms
-
-The bot joins the custom games whose name matches `room_names`
-(`"vill win"` by default).  The matching is word based, so it also
-covers "village win" and "24HR VILL WIN NT (E)".  Rooms with a password
-are skipped - the server refuses the join without it.  Set
-`allow_password_rooms` and `room_password` in the config to try them
-anyway.
-
-## Development
-
-The bot is standard library only, and so are its tests:
-
-```bash
+cd wv-bot
 python -m unittest discover -s tests -v
 ```
+All 191+ test cases cover protocol serialization, auth lifecycle, game policy, fast reconnect, watchdog monitoring, and multi-account farm supervision.
 
-Every protocol fix lands with a test first; the suite covers the payload
-parsing, the XP tables, the game events, the vote policy, the history,
-the pacing and the config load order.
+---
 
-## Configuration (the live one sits in `~/.wv-bot/config.json` on the phone)
+## Configuration Reference (`config.json`)
 
-| Key | Default | Meaning |
+| Key | Default | Description |
 |---|---|---|
-| `room_names` | `["vill win"]` | word-matched against the room list |
-| `delay_min_sec` / `delay_max_sec` | 45 / 150 | the wait between two games, drawn at random |
-| `joins_per_hour` | 12 | past this the bot waits 5 extra minutes per round |
-| `room_skip_chance` | 0.15 | chance to leave a matching room alone this round |
-| `daily_restart_hour` | 4 | the process re-executes itself at this local hour (`null` = off) |
-| `silence_timeout_sec` | 300 | a game with no events for this long is restarted |
-| `allow_password_rooms` / `room_password` | false / "" | join locked rooms (when they share one password) |
-| `claim_daily_rewards` | true | the daily ladder rung whose date has arrived |
-| `open_loot_boxes` | true | open the loot boxes between games |
-| `spin_golden_wheel` | false | spin the wheel when it costs at most `wheel_max_roses` |
-| `chat_enabled` / `chat_messages` | false / [] | the optional greeting (30% chance per game) |
-| `dashboard_host` / `dashboard_port` | 0.0.0.0 / 8787 | where the status panel listens |
+| `room_names` | `["vill win"]` | Substrings matched against open custom rooms |
+| `delay_min_sec` / `delay_max_sec` | 45 / 150 | Random delay range between consecutive matches |
+| `joins_per_hour` | 12 | Rolling join rate limit before applying backoff |
+| `room_skip_chance` | 0.15 | Probability to skip a matching room to mimic human hesitation |
+| `silence_timeout_sec` | 300 | Timeout before resetting a silent/hung game socket |
+| `fast_reconnect_enabled` | true | Enable automatic fast rejoin on mid-match socket drops |
+| `claim_daily_rewards` | true | Automatically claim daily ladder rewards between matches |
+| `open_loot_boxes` | true | Automatically open accumulated loot boxes |
+| `spin_golden_wheel` | false | Spin golden wheel when cost <= `wheel_max_roses` |
+| `dashboard_port` | 8787 | Port for the HTTP dashboard and API server |
 
-## The two modes
+---
 
-| Mode | Command | Needs |
-|---|---|---|
-| protocol | `python3 run.py` (default) | a refresh token |
-| web | `python3 run.py --mode web` | a browser (headless Firefox on the phone) |
+## License
 
-The protocol mode is the default because it needs nothing but the Python
-standard library.
+This project is licensed under the [MIT License](LICENSE).
