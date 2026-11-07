@@ -92,6 +92,14 @@ class Config:
     claim_double_xp: bool = True
     chat_enabled: bool = False
     chat_messages: list[str] = field(default_factory=list)
+    # Instant deterministic regex reflex chat (0ms AI-free reflex)
+    reflex_chat_enabled: bool = True
+    reflex_chat_cooldown_sec: float = 12.0
+    # Bio-break fatigue simulator (prevent 24/7 robotic anomaly detection)
+    bio_break_enabled: bool = True
+    bio_break_interval_games: int = 12
+    bio_break_min_sec: float = 120.0
+    bio_break_max_sec: float = 240.0
     # Fast reconnect on unexpected network disconnect during an active game
     fast_reconnect_enabled: bool = True
     fast_reconnect_max_attempts: int = 3

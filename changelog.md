@@ -9,6 +9,29 @@ and the project uses [semantic versioning](https://semver.org/).
 
 Planned work, see `docs/FEATURE-PLAN.md` for the full list.
 
+## [1.0.3] - 2026-11-07
+
+Deterministic Reflex Engine (0ms Latency / Zero AI), Expanded Role Engine, and Human Fatigue Simulator.
+
+### Added
+
+- **Deterministic Instant Reflex Engine (`wvbot/reflex.py`)**:
+  - Pure Python standard library (`re`, `random`, `time`), zero external dependencies, 0.1ms instant response latency.
+  - Context-aware bot-check evasion: detects username mentions (`botzxc`, `zxc`), seat number calls (`14 afk?`, `14 role?`), and common bot queries (`"are you a bot"`, `"afk?"`).
+  - Realistic slang response pool (`"im here"`, `"v"`, `"lag sry"`, `"skip"`, `"reading"`).
+  - Human typing jitter: delay calculated based on message length (`1.2s + len * 0.07s + uniform(0.3, 1.2)`).
+  - Strict cooldown: 12.0s minimum gap between automated replies to eliminate repetitive robotic behavior.
+  - End-of-match reflex: 35% chance to emit casual `"gg"`, `"wp"`, `"ggs"`.
+  - Skip echo reflex: 25% chance to reinforce room voting consensus during day-voting phase.
+- **Deep Deterministic Role Engine Expansion**:
+  - **Medium (`game-medium-revive-player`)**: Automatically targets dead villagers (never revives dead wolves), prioritizing high-level players.
+  - **Seer & Investigators (`game-seer-reveal-player`)**: Systematically explores living players with unknown roles.
+  - **Doctor & Bodyguard (`PROTECTOR_ROLES`)**: Prioritizes protecting confirmed Seers and veteran players.
+  - **Safe Killer Discipline**: Suppresses blind shooting for Gunner, Priest, and Vigilante in "vill win" lobbies to avoid teamkill bans and host blacklisting.
+- **Human Bio-Break / Fatigue Simulator**:
+  - Simulates natural human breaks every 10-12 consecutive games (`bio_break_min_sec: 120s` to `bio_break_max_sec: 240s`).
+  - Completely disrupts 24/7 robotic telemetry signatures monitored by anti-cheat systems.
+
 ## [1.0.2] - 2026-11-07
 
 Multi-Account Hot-Roster REST API and Real-Time Accounts UI.

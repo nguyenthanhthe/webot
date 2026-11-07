@@ -17,7 +17,15 @@ from unittest import mock
 
 import wvbot.bot as bot_module
 import wvbot.config as config_module
-from wvbot.bot import KILLER_ROLES, PROTECTOR_ROLES, Bot, _extract_game_info, _parse_ban_until
+from wvbot.bot import (
+    INVESTIGATOR_ROLES,
+    KILLER_ROLES,
+    PROTECTOR_ROLES,
+    REVIVER_ROLES,
+    Bot,
+    _extract_game_info,
+    _parse_ban_until,
+)
 from wvbot.dashboard import StatusStore
 
 
@@ -72,9 +80,18 @@ class RoleTablesTest(unittest.TestCase):
         events = list(PROTECTOR_ROLES.values())
         self.assertEqual(len(events), len(set(events)))
 
-    def test_no_role_is_both_killer_and_protector(self) -> None:
-        overlap = set(KILLER_ROLES) & set(PROTECTOR_ROLES)
-        self.assertEqual(overlap, set())
+    def test_reviver_events_are_unique(self) -> None:
+        events = list(REVIVER_ROLES.values())
+        self.assertEqual(len(events), len(set(events)))
+
+    def test_investigator_events_are_unique(self) -> None:
+        events = list(INVESTIGATOR_ROLES.values())
+        self.assertEqual(len(events), len(set(events)))
+
+    def test_no_role_cross_contamination(self) -> None:
+        self.assertEqual(set(KILLER_ROLES) & set(PROTECTOR_ROLES), set())
+        self.assertEqual(set(KILLER_ROLES) & set(REVIVER_ROLES), set())
+        self.assertEqual(set(PROTECTOR_ROLES) & set(REVIVER_ROLES), set())
 
 
 class PhaseGuardTest(unittest.TestCase):
@@ -853,6 +870,93 @@ class FastReconnectTest(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertEqual(len(failing_sockets), 1)
         self.assertEqual(result, [True])
+
+
+class RoleActionHandlersTest(unittest.TestCase):
+    def test_reviver_action_queues_medium_event(self) -> None:
+        state = types.SimpleNamespace(
+            role_id="medium",
+            players=[],
+            dead_ids=[],
+            own_id=lambda: "bot-id",
+        )
+        policy = types.SimpleNamespace(
+            revive_target=mock.MagicMock(return_value="dead-player-1"),
+        )
+        queued = []
+        bot = shell(
+            state=state,
+            policy=policy,
+            _acted_keys=set(),
+            _queue_action=lambda name, low, high, act: queued.append((name, act)),
+            log_event=mock.MagicMock(),
+        )
+        fake_sock = mock.MagicMock()
+        bot._reviver_action(fake_sock)
+        self.assertEqual(len(queued), 1)
+        name, act = queued[0]
+        self.assertEqual(name, "game-medium-revive-player")
+        act()
+        fake_sock.emit.assert_called_once_with(
+            "game-medium-revive-player",
+            '{"targetPlayerId": "dead-player-1"}',
+        )
+
+    def test_investigator_action_queues_seer_event(self) -> None:
+        state = types.SimpleNamespace(
+            role_id="seer",
+            players=[],
+            dead_ids=[],
+            alive=[],
+            own_id=lambda: "bot-id",
+        )
+        policy = types.SimpleNamespace(
+            reveal_target=mock.MagicMock(return_value="sus-player-2"),
+        )
+        queued = []
+        bot = shell(
+            state=state,
+            policy=policy,
+            _acted_keys=set(),
+            _queue_action=lambda name, low, high, act: queued.append((name, act)),
+            log_event=mock.MagicMock(),
+        )
+        fake_sock = mock.MagicMock()
+        bot._investigator_action(fake_sock)
+        self.assertEqual(len(queued), 1)
+        name, act = queued[0]
+        self.assertEqual(name, "game-seer-reveal-player")
+        act()
+        fake_sock.emit.assert_called_once_with(
+            "game-seer-reveal-player",
+            '{"targetPlayerId": "sus-player-2"}',
+        )
+
+    def test_safe_killer_suppresses_blind_shot_in_vill_win(self) -> None:
+        state = types.SimpleNamespace(
+            role_id="gunner",
+            players=[],
+            alive=[],
+            day_votes={},
+            messages=[],
+            own_id=lambda: "bot-id",
+        )
+        cfg = types.SimpleNamespace(room_names="🏆 VILL WIN 🏆")
+        from wvbot.game import Policy
+        policy = Policy(cfg)
+        queued = []
+        bot = shell(
+            state=state,
+            cfg=cfg,
+            policy=policy,
+            _acted_keys=set(),
+            _queue_action=lambda name, low, high, act: queued.append((name, act)),
+            log_event=mock.MagicMock(),
+        )
+        fake_sock = mock.MagicMock()
+        bot._killer_action(fake_sock)
+        # In vill-win, no confirmed wolves and no accusations -> suppresses shot
+        self.assertEqual(len(queued), 0)
 
 
 if __name__ == "__main__":
