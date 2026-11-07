@@ -152,7 +152,7 @@ class Bot:
 
     def _refresh_cf_jwt(self) -> None:
         self.auth.refresh_cf_jwt()
-        self.api.auth_headers = self.auth.auth_headers()
+        self.api.auth_headers = self.auth.auth_headers
 
     def _room_probe(self, language: str = "en", host: str = "") -> Any:
         """The raw room list of a region, served through the dashboard.
@@ -449,7 +449,7 @@ class Bot:
         self.store.update(history=self.history.get())
         try:
             self.auth.ensure_token()
-            self.api.auth_headers = self.auth.auth_headers()
+            self.api.auth_headers = self.auth.auth_headers
             self.log_event("auth", "authenticated")
             self._read_profile()
         except Exception as exc:  # noqa: BLE001 - keep the loop alive
@@ -537,6 +537,7 @@ class Bot:
                     try:
                         self.log_event("auth", "HTTP 401 received - forcing credential refresh")
                         self.auth.ensure_token(force=True)
+                        self.api.auth_headers = self.auth.auth_headers
                     except Exception as auth_exc:  # noqa: BLE001
                         log.warning("forced token refresh failed: %s", auth_exc)
                 self.stop_event.wait(self._backoff)
@@ -552,6 +553,7 @@ class Bot:
         self.store.update(status="looking for room", phase="lobby", room=None)
         try:
             self.auth.ensure_token()
+            self.api.auth_headers = self.auth.auth_headers
         except Exception as exc:  # noqa: BLE001
             log.warning("could not ensure auth token before session: %s", exc)
 
@@ -597,7 +599,7 @@ class Bot:
         self._note_join()
 
         token = self.auth.ensure_token()
-        self.api.auth_headers = self.auth.auth_headers()
+        self.api.auth_headers = self.auth.auth_headers
 
         # A custom game is entered directly: the game socket carries the
         # game id and the mode, there is no lobby step in between.
