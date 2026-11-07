@@ -92,6 +92,11 @@ class Config:
     claim_double_xp: bool = True
     chat_enabled: bool = False
     chat_messages: list[str] = field(default_factory=list)
+    # Fast reconnect on unexpected network disconnect during an active game
+    fast_reconnect_enabled: bool = True
+    fast_reconnect_max_attempts: int = 3
+    fast_reconnect_delay_sec: float = 3.0
+    socket_join_delay_sec: float = 1.0
     # Seconds to wait before re-joining after being kicked / disconnected.
     # The server bans players that join too often, so this is deliberately
     # generous rather than quick.

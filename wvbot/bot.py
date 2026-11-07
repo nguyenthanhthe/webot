@@ -529,14 +529,8 @@ class Bot:
         """A random number between 42 and 99, like the official client."""
         return random.SystemRandom().randint(42, 99)
 
-    def _play_game(self, token: str, game_id: Any, server_url: str) -> bool:
-        self._session_over.clear()
-        # A custom game is played on the LOBBY socket.  The client
-        # emits "mg:join-open-game" with the room id and the server
-        # sends the whole game (game-started, the votes, the awards) on
-        # that same socket.  A separate game socket with the game id in
-        # the query always answers "error-game-connection-lost".
-        sock = SocketIOClient(
+    def _create_game_socket(self, token: str, server_url: str) -> SocketIOClient:
+        return SocketIOClient(
             server_url,
             query={
                 "firebaseToken": token,
@@ -549,41 +543,124 @@ class Bot:
             headers={"Origin": "https://app.wolvesville.com"},
         )
 
+    def _play_game(self, token: str, game_id: Any, server_url: str) -> bool:
+        self._session_over.clear()
         finished = threading.Event()
+        disconnected = threading.Event()
+        game_over = threading.Event()
         last_event = [time.time()]
+        active_sock = [None]
 
         def handle(event: str, *args: Any) -> None:
             last_event[0] = time.time()
-            self._on_game_event(sock, event, args)
+            if active_sock[0]:
+                self._on_game_event(active_sock[0], event, args)
 
-        sock.on_any(handle)
-        sock.on("disconnect", lambda *a: finished.set())
-        sock.on("game-over-awards-available", lambda *a: finished.set())
+        def on_disconnect() -> None:
+            if not game_over.is_set():
+                disconnected.set()
+            finished.set()
 
-        try:
-            sock.start()
-        except Exception as exc:  # noqa: BLE001
-            self.log_event("error", f"game socket failed: {exc}")
-            return False
+        def on_awards(*args: Any) -> None:
+            game_over.set()
+            finished.set()
 
-        # The join itself: the room id goes to the lobby socket.  The
-        # official client sends a plain object here.
-        time.sleep(2.0)
-        try:
-            sock.emit("mg:join-open-game", {"miniGameId": game_id})
-        except Exception as exc:  # noqa: BLE001
-            self.log_event("error", f"the join request failed: {exc}")
-            sock.close()
+        def setup_socket(s: Any) -> bool:
+            s.on_any(handle)
+            s.on("disconnect", on_disconnect)
+            s.on("game-over-awards-available", on_awards)
+            try:
+                s.start()
+            except Exception as exc:  # noqa: BLE001
+                self.log_event("error", f"game socket failed: {exc}")
+                return False
+            join_delay = getattr(self.cfg, "socket_join_delay_sec", 1.0)
+            if join_delay > 0:
+                time.sleep(join_delay)
+            try:
+                s.emit("mg:join-open-game", {"miniGameId": game_id})
+            except Exception as exc:  # noqa: BLE001
+                self.log_event("error", f"the join request failed: {exc}")
+                s.close()
+                return False
+            return True
+
+        sock = self._create_game_socket(token, server_url)
+        active_sock[0] = sock
+        if not setup_socket(sock):
             return False
 
         self.store.update(status="playing")
-        # Stop as soon as the server bans us: touching it again would
-        # only make the ban longer.
-        while not finished.wait(timeout=1.0):
-            # A stop or restart request from outside ends the game here,
-            # so the leave below is still announced.  A socket that
-            # simply disappears counts as fleeing the village and the
-            # account gets banned for it.
+        reconnect_attempts = 0
+        max_reconnects = (
+            getattr(self.cfg, "fast_reconnect_max_attempts", 3)
+            if getattr(self.cfg, "fast_reconnect_enabled", True)
+            else 0
+        )
+        reconnect_delay = getattr(self.cfg, "fast_reconnect_delay_sec", 3.0)
+
+        while not self.stop_event.is_set():
+            if finished.wait(timeout=1.0):
+                if game_over.is_set():
+                    break
+
+                if (
+                    disconnected.is_set()
+                    and not self._session_over.is_set()
+                    and not self._banned.is_set()
+                ):
+                    disconnected.clear()
+                    if (
+                        reconnect_attempts < max_reconnects
+                        and not self.stop_event.is_set()
+                        and not self._restart.is_set()
+                    ):
+                        reconnect_attempts += 1
+                        self.log_event(
+                            "warn",
+                            f"socket disconnected mid-game - fast rejoin attempt "
+                            f"{reconnect_attempts}/{max_reconnects} to room {game_id}",
+                        )
+                        self.store.update(status="reconnecting")
+                        self.store.update(
+                            reconnects=int(self.store.get().get("reconnects") or 0) + 1
+                        )
+                        try:
+                            if active_sock[0]:
+                                active_sock[0].close()
+                        except Exception:
+                            pass
+
+                        self.stop_event.wait(reconnect_delay)
+                        if self.stop_event.is_set():
+                            break
+
+                        finished.clear()
+                        try:
+                            fresh_token = self.auth.ensure_token()
+                        except Exception as auth_exc:  # noqa: BLE001
+                            log.warning("token refresh during reconnect failed: %s", auth_exc)
+                            fresh_token = token
+
+                        new_sock = self._create_game_socket(fresh_token, server_url)
+                        active_sock[0] = new_sock
+                        if setup_socket(new_sock):
+                            last_event[0] = time.time()
+                            self.store.update(status="playing")
+                            self.log_event("game", f"fast rejoin connected for room {game_id}")
+                            continue
+                        else:
+                            self.log_event(
+                                "warn",
+                                f"fast rejoin setup failed on attempt {reconnect_attempts}",
+                            )
+                            if reconnect_attempts >= max_reconnects:
+                                break
+                            continue
+                    else:
+                        self.log_event("warn", "fast reconnect exhausted or disabled - leaving room")
+                        break
+
             if self.stop_event.is_set() or self._restart.is_set():
                 self._restart.clear()
                 self.log_event("bot", "stop or restart request - leaving the room properly")
@@ -592,8 +669,6 @@ class Bot:
                 break
             if self._session_over.is_set():
                 break
-            # A socket that stays open but says nothing is a hang: the
-            # game is over on the server and we would sit here for hours.
             if time.time() - last_event[0] > self.cfg.silence_timeout_sec:
                 self.log_event("warn", "no server event for a long time - restarting the game")
                 break
@@ -602,12 +677,14 @@ class Bot:
         # disappears counts as "fleeing the village" and the server bans
         # the account for it.
         try:
-            sock.emit("mg:exit-game", {"miniGameId": game_id})
-            self.log_event("game", "left the room")
+            if active_sock[0]:
+                active_sock[0].emit("mg:exit-game", {"miniGameId": game_id})
+                self.log_event("game", "left the room")
         except Exception as exc:  # noqa: BLE001
             self.log_event("warn", f"the leave request failed: {exc}")
         time.sleep(1.0)
-        sock.close()
+        if active_sock[0]:
+            active_sock[0].close()
 
         award = self.state.last_award
         if award:
@@ -626,8 +703,8 @@ class Bot:
             # The counters survive a restart.
             self.history.record_game(xp)
             self.store.update(history=self.history.get())
-            if self.cfg.claim_double_xp and award.get("canClaimDoubleXp"):
-                self._claim_double_xp(sock)
+            if self.cfg.claim_double_xp and award.get("canClaimDoubleXp") and active_sock[0]:
+                self._claim_double_xp(active_sock[0])
 
         self.store.update(status="reconnecting")
         self.store.update(reconnects=int(self.store.get().get("reconnects") or 0) + 1)
@@ -694,6 +771,8 @@ class Bot:
                 self.store.update(levels=self._player_levels())
             if event in ("game-players-killed", "game-reconnect-set-players"):
                 self._update_alive()
+                if event == "game-reconnect-set-players":
+                    self.log_event("game", "reconnected - player state synchronized")
         elif event == "game-over-awards-available":
             # The raw payload goes into the log once per game: it is the
             # ground truth a future feature (win counting) needs, and it
@@ -1190,7 +1269,7 @@ class Bot:
         if not self.cfg.chat_enabled or not message:
             return
         try:
-            sock.emit("game:chat-public:msg", {"msg": message})
+            sock.emit("game:chat-public:msg", json.dumps({"msg": message}))
         except Exception:  # noqa: BLE001
             pass
 

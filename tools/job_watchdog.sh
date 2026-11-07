@@ -51,7 +51,7 @@ if [ -d "$LOCK" ]; then
         [ -r "$entry/cmdline" ] || continue
         cmd=$(tr '\0' ' ' < "$entry/cmdline" 2>/dev/null || true)
         case "$cmd" in
-          *"run.py --mode protocol"*)
+          *"run.py"*|*"wvbot"*)
             kill -9 "$pid" 2>/dev/null || true
             ;;
         esac
