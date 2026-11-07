@@ -365,6 +365,11 @@ class Bot:
         if not self.cfg.prefer_small_rooms:
             return random.SystemRandom().choice(top)
 
+        # In Wolvesville, 7-10 players means the room has hit the 8-player start threshold
+        ready_to_start = [room for room in top if 7 <= size(room) <= 11]
+        if ready_to_start:
+            return random.SystemRandom().choice(ready_to_start)
+
         # In 8p rooms, 4-7 players means the room is about to start
         viable = [room for room in top if size(room) >= 4] or top
         smallest = min(size(room) for room in viable)

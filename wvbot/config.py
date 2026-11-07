@@ -96,9 +96,9 @@ class Config:
     vill_win_mode: bool = True  # Wolf self-claim & no bite at night, killer instant reaction
     wolf_self_claim: bool = True  # Claim seat number as wolf on Day 1 (e.g. "5 w")
     instant_kill: bool = True  # Killer roles shoot claimed wolf immediately (<0.5s)
-    prefer_8p_rooms: bool = True  # Strictly prioritize 8-player custom rooms
-    strict_8p_only: bool = True  # When true, reject 16-player rooms entirely and wait for 8p
-    max_room_size: int = 8  # Target max players for rapid cycling
+    prefer_8p_rooms: bool = True  # Prioritize rooms near the 8-player start threshold (7-10 players)
+    strict_8p_only: bool = False  # Relaxed: Wolvesville rooms have 16 role slots but start at 8 players
+    max_room_size: int = 16  # Standard Wolvesville custom lobby size
 
     # --- behaviour -----------------------------------------------------
     claim_double_xp: bool = True

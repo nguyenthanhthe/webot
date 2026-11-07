@@ -25,7 +25,7 @@
   "wolf_self_claim": true,
   "instant_kill": true,
   "prefer_8p_rooms": true,
-  "strict_8p_only": true,
+  "strict_8p_only": false,
   "claim_double_xp": true,
   "reflex_chat_enabled": true,
   "chat_enabled": false,
