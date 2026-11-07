@@ -97,6 +97,7 @@ class Config:
     wolf_self_claim: bool = True  # Claim seat number as wolf on Day 1 (e.g. "5 w")
     instant_kill: bool = True  # Killer roles shoot claimed wolf immediately (<0.5s)
     prefer_8p_rooms: bool = True  # Strictly prioritize 8-player custom rooms
+    strict_8p_only: bool = True  # When true, reject 16-player rooms entirely and wait for 8p
     max_room_size: int = 8  # Target max players for rapid cycling
 
     # --- behaviour -----------------------------------------------------

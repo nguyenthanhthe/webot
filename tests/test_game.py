@@ -216,6 +216,29 @@ class GameStateEventTest(unittest.TestCase):
         state.set_own_id(42)
         self.assertEqual(state.own_id(), 42)
 
+    def test_wolf_claim_ww_say_m(self) -> None:
+        state = make_state()
+        state.apply(
+            "game-started",
+            {
+                "role": {"id": "villager"},
+                "players": [
+                    {"id": "p1", "gridIdx": 0, "username": "player1"},
+                    {"id": "p2", "gridIdx": 1, "username": "player2"},
+                ],
+            },
+        )
+        state.set_own_id("p1")
+        # Player 2 claims wolf with simple "m" in WW Say M room
+        state.apply("game:chat-public:msg", {"authorId": "p2", "msg": "m"})
+        self.assertEqual(state.claimed_wolf_id, "p2")
+        self.assertEqual(state.claimed_wolf_seat, 2)
+
+        # Seat-based claim "1 m"
+        state.apply("game:chat-public:msg", {"authorId": "p2", "msg": "1 m"})
+        self.assertEqual(state.claimed_wolf_id, "p1")
+        self.assertEqual(state.claimed_wolf_seat, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

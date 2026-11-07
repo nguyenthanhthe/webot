@@ -1084,6 +1084,60 @@ class TurboVillWinFarmTest(unittest.TestCase):
             '{"targetPlayerId": "wolf-target"}',
         )
 
+    def test_wolf_self_claim_emits_m_in_say_m_rooms(self) -> None:
+        state = types.SimpleNamespace(
+            is_wolf=True,
+            own_seat=lambda: 3,
+            own_id=lambda: "bot-wolf-id",
+            claimed_wolf_id=None,
+            claimed_wolf_seat=None,
+        )
+        cfg = types.SimpleNamespace(
+            vill_win_mode=True,
+            wolf_self_claim=True,
+            turbo_mode=True,
+        )
+        fake_store = types.SimpleNamespace(
+            get=lambda: {"room": "WW Say M (E)"}
+        )
+        queued = []
+        chats = []
+        bot = shell(
+            state=state,
+            cfg=cfg,
+            store=fake_store,
+            _acted_keys=set(),
+            _queue_action=lambda name, low, high, act: queued.append((name, act)),
+            chat=lambda sock, msg: chats.append(msg),
+            log_event=mock.MagicMock(),
+        )
+        fake_sock = mock.MagicMock()
+        bot._wolf_self_claim(fake_sock)
+        self.assertEqual(len(queued), 1)
+        queued[0][1]()
+        self.assertIn("m", chats)
+
+    def test_strict_8p_only_rejects_16p_rooms(self) -> None:
+        cfg = types.SimpleNamespace(
+            strict_8p_only=True,
+            prefer_8p_rooms=True,
+            prefer_small_rooms=True,
+        )
+        bot = shell(cfg=cfg)
+        rooms_16p = [
+            {"name": "vill win 16p", "regularXp": True, "roles": ["r"] * 16, "playerCount": 10},
+        ]
+        picked = bot._pick_room(rooms_16p)
+        self.assertIsNone(picked)
+
+        rooms_with_8p = [
+            {"name": "vill win 16p", "regularXp": True, "roles": ["r"] * 16, "playerCount": 10},
+            {"name": "WW Say M", "regularXp": True, "roles": ["r"] * 8, "playerCount": 6},
+        ]
+        picked_8p = bot._pick_room(rooms_with_8p)
+        self.assertIsNotNone(picked_8p)
+        self.assertEqual(picked_8p["name"], "WW Say M")
+
 
 if __name__ == "__main__":
     unittest.main()

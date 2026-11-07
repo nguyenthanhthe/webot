@@ -307,6 +307,32 @@ class Bot:
         """
         if not rooms:
             return None
+
+        def is_8p_room(room: dict[str, Any]) -> bool:
+            name = GameApi._room_name(room).lower()
+            max_p = 0
+            for key in ("maxPlayerCount", "maxPlayers", "playerLimit"):
+                if key in room:
+                    try:
+                        max_p = int(room[key] or 0)
+                        break
+                    except (TypeError, ValueError):
+                        pass
+            roles = room.get("roles")
+            roles_count = len(roles) if isinstance(roles, list) else 0
+            if 0 < max_p <= 8:
+                return True
+            if 0 < roles_count <= 8:
+                return True
+            if any(k in name for k in ("8p", "8 p", "8-p", " 8 ", "8player", "vw8", "vw 8", "say m", "ww say", "m only")):
+                return True
+            return False
+
+        if getattr(self.cfg, "strict_8p_only", False):
+            rooms = [r for r in rooms if is_8p_room(r)]
+            if not rooms:
+                return None
+
         if len(rooms) == 1:
             return rooms[0]
 
@@ -330,26 +356,6 @@ class Bot:
                 return int(room.get("playerCount") or 0)
             except (TypeError, ValueError):
                 return 99
-
-        def is_8p_room(room: dict[str, Any]) -> bool:
-            name = GameApi._room_name(room).lower()
-            max_p = 0
-            for key in ("maxPlayerCount", "maxPlayers", "playerLimit"):
-                if key in room:
-                    try:
-                        max_p = int(room[key] or 0)
-                        break
-                    except (TypeError, ValueError):
-                        pass
-            roles = room.get("roles")
-            roles_count = len(roles) if isinstance(roles, list) else 0
-            if 0 < max_p <= 8:
-                return True
-            if 0 < roles_count <= 8:
-                return True
-            if any(k in name for k in ("8p", "8 p", "8-p", " 8 ", "8player", "vw8")):
-                return True
-            return False
 
         if getattr(self.cfg, "prefer_8p_rooms", True):
             eight_p = [r for r in top if is_8p_room(r)]
@@ -1293,7 +1299,12 @@ class Bot:
             return
         self.state.claimed_wolf_id = self.state.own_id()
         self.state.claimed_wolf_seat = seat
-        claim_msg = f"{seat} w"
+        store = getattr(self, "store", None)
+        room_name = (store.get().get("room") or "").lower() if store else ""
+        if any(k in room_name for k in ("say m", "ww say", "m only")):
+            claim_msg = "m"
+        else:
+            claim_msg = f"{seat} w"
 
         def speak() -> None:
             self.chat(sock, claim_msg)
