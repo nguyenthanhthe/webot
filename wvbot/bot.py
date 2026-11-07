@@ -328,6 +328,21 @@ class Bot:
                 return True
             return False
 
+        def is_tf_room(room: dict[str, Any]) -> bool:
+            """Troll Free (TF) rooms are serious 10-minute games, not fast XP farms."""
+            name = GameApi._room_name(room).lower()
+            return any(k in name for k in (" tf", "-tf", "(tf)", "troll free", "trollfree", "e tf"))
+
+        # Deprioritize slow Troll Free (TF) rooms when farm rooms exist
+        non_tf = [r for r in rooms if not is_tf_room(r)]
+        if non_tf:
+            rooms = non_tf
+
+        # Prioritize instant 'WW Say M' rooms if available
+        say_m = [r for r in rooms if any(k in GameApi._room_name(r).lower() for k in ("say m", "ww say", "m only"))]
+        if say_m:
+            return random.SystemRandom().choice(say_m)
+
         if getattr(self.cfg, "strict_8p_only", False):
             rooms = [r for r in rooms if is_8p_room(r)]
             if not rooms:
@@ -1333,6 +1348,10 @@ class Bot:
             return
         if not self.state.is_wolf:
             return
+        if hasattr(self.state, "by_id"):
+            own = self.state.by_id(self.state.own_id())
+            if own and not getattr(own, "is_alive", True):
+                return
         if self._acted("wolf-self-claim"):
             return
         seat = self.state.own_seat()
@@ -1374,6 +1393,10 @@ class Bot:
     def _day_vote(self, sock: SocketIOClient) -> None:
         if self._acted("day-vote"):
             return
+        if hasattr(self.state, "by_id"):
+            own = self.state.by_id(self.state.own_id())
+            if own and not getattr(own, "is_alive", True):
+                return
         target = self.policy.vote_target(self.state)
 
         def vote() -> None:
