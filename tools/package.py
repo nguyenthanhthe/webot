@@ -37,6 +37,7 @@ MEMBERS = [
     (ROOT / "wvbot" / "updates.py", "wvbot/updates.py"),
     (ROOT / "wvbot" / "ws.py", "wvbot/ws.py"),
     (ROOT / "wvbot" / "webbot.py", "wvbot/webbot.py"),
+    (ROOT / "wvbot" / "reflex.py", "wvbot/reflex.py"),
     (ROOT / "run.py", "run.py"),
     (ROOT / "setcreds.py", "setcreds.py"),
     (ROOT / "config.json", "config.json"),
