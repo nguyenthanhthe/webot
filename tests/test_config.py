@@ -76,6 +76,10 @@ class LoadConfigTest(unittest.TestCase):
         cfg = load_config("missing-config.json")
         self.assertEqual(cfg.joins_per_hour, 12)
         self.assertEqual(cfg.room_names, ["vill win"])
+        self.assertTrue(cfg.fast_reconnect_enabled)
+        self.assertEqual(cfg.fast_reconnect_max_attempts, 3)
+        self.assertEqual(cfg.fast_reconnect_delay_sec, 3.0)
+        self.assertEqual(cfg.socket_join_delay_sec, 1.0)
 
     def test_the_json_file_wins_over_the_defaults(self) -> None:
         (self.state_dir / "config.json").write_text(

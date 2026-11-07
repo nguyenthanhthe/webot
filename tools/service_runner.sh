@@ -37,7 +37,7 @@ for entry in /proc/[0-9]*; do
   [ -r "$entry/cmdline" ] || continue
   cmd=$(tr '\0' ' ' < "$entry/cmdline" 2>/dev/null || true)
   case "$cmd" in
-    *"run.py --mode protocol"*|*"service/runner.sh"*)
+    *"run.py"*|*"wvbot"*|*"service/runner.sh"*)
       echo "stopping the leftover pid $pid" >> "$LOG"
       kill -9 "$pid" 2>/dev/null || true
       ;;
