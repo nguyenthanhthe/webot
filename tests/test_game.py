@@ -239,6 +239,63 @@ class GameStateEventTest(unittest.TestCase):
         self.assertEqual(state.claimed_wolf_id, "p1")
         self.assertEqual(state.claimed_wolf_seat, 1)
 
+    def test_wolf_claim_ww_and_seat_variants(self) -> None:
+        state = make_state()
+        state.apply(
+            "game-started",
+            {
+                "role": {"id": "villager"},
+                "players": [
+                    {"id": "p1", "gridIdx": 0, "username": "player1"},
+                    {"id": "p2", "gridIdx": 1, "username": "player2"},
+                ],
+            },
+        )
+        state.set_own_id("p1")
+        # "2 ww" claim
+        state.apply("game:chat-public:msg", {"authorId": "p2", "msg": "2 ww"})
+        self.assertEqual(state.claimed_wolf_id, "p2")
+
+        # "ww 2" claim
+        state.apply("game:chat-public:msg", {"authorId": "p1", "msg": "ww 2"})
+        self.assertEqual(state.claimed_wolf_id, "p2")
+
+        # Author says "im ww"
+        state.apply("game:chat-public:msg", {"authorId": "p2", "msg": "im ww"})
+        self.assertEqual(state.claimed_wolf_id, "p2")
+
+    def test_bandwagon_voting(self) -> None:
+        from wvbot.game import Policy
+        state = make_state()
+        state.apply(
+            "game-started",
+            {
+                "role": {"id": "villager"},
+                "players": [
+                    {"id": "bot", "gridIdx": 0, "username": "bot"},
+                    {"id": "p2", "gridIdx": 1, "username": "player2"},
+                    {"id": "p3", "gridIdx": 2, "username": "player3"},
+                ],
+            },
+        )
+        state.set_own_id("bot")
+        policy = Policy()
+
+        # Nobody voted yet -> None
+        self.assertIsNone(policy.vote_target(state))
+
+        # p2 votes for p3 -> bandwagon policy returns p3!
+        state.day_votes["p2"] = "p3"
+        self.assertEqual(policy.vote_target(state), "p3")
+
+        # p3 votes for bot -> policy should NOT vote for bot itself
+        state.day_votes = {"p3": "bot"}
+        self.assertIsNone(policy.vote_target(state))
+
+        # Majority vote selection
+        state.day_votes = {"p1": "p2", "p4": "p3", "p5": "p3"}
+        self.assertEqual(policy.vote_target(state), "p3")
+
 
 if __name__ == "__main__":
     unittest.main()

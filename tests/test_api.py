@@ -38,6 +38,12 @@ class GameApiHeadersTest(unittest.TestCase):
         api.auth_headers = {"Authorization": "Bearer updated"}
         self.assertEqual(api.auth_headers, {"Authorization": "Bearer updated"})
 
+    def test_fold_mathematical_unicode_fonts(self) -> None:
+        # Fancy Unicode math double-struck characters used in room names like "🌺|𝕍𝕚𝕝𝕝 𝕎𝕚𝕟 𝔼 TF"
+        folded = GameApi.fold("🌺|𝕍𝕚𝕝𝕝 𝕎𝕚𝕟 𝔼 TF")
+        self.assertIn("vill win", folded)
+        self.assertIn("tf", folded)
+
 
 if __name__ == "__main__":
     unittest.main()
