@@ -307,6 +307,34 @@ class MaybeChatTest(unittest.TestCase):
         self.assertEqual(sent, [])
 
 
+class ChatMethodTest(unittest.TestCase):
+    def test_chat_emits_json_string(self) -> None:
+        import json
+
+        bot = shell(cfg=types.SimpleNamespace(chat_enabled=True))
+        emitted = []
+        sock = types.SimpleNamespace(emit=lambda evt, payload: emitted.append((evt, payload)))
+        bot.chat(sock, "hello room")
+        self.assertEqual(len(emitted), 1)
+        self.assertEqual(emitted[0][0], "game:chat-public:msg")
+        self.assertIsInstance(emitted[0][1], str)
+        self.assertEqual(json.loads(emitted[0][1]), {"msg": "hello room"})
+
+    def test_chat_disabled_does_not_emit(self) -> None:
+        bot = shell(cfg=types.SimpleNamespace(chat_enabled=False))
+        emitted = []
+        sock = types.SimpleNamespace(emit=lambda evt, payload: emitted.append((evt, payload)))
+        bot.chat(sock, "hello")
+        self.assertEqual(emitted, [])
+
+    def test_empty_message_does_not_emit(self) -> None:
+        bot = shell(cfg=types.SimpleNamespace(chat_enabled=True))
+        emitted = []
+        sock = types.SimpleNamespace(emit=lambda evt, payload: emitted.append((evt, payload)))
+        bot.chat(sock, "")
+        self.assertEqual(emitted, [])
+
+
 class DailyClaimMarkerTest(unittest.TestCase):
     def _bot(self) -> Bot:
         return shell(store=StatusStore())
@@ -660,6 +688,171 @@ class PlayerLevelsTest(unittest.TestCase):
         rows = bot._player_levels()
         self.assertEqual(rows[0], {"name": "bob", "level": 20, "alive": False, "own": False})
         self.assertEqual(rows[1], {"name": "me", "level": 2, "alive": True, "own": True})
+
+
+class FakeGameSocket:
+    def __init__(self, start_fails: bool = False):
+        self.handlers: dict[str, list] = {}
+        self.any_handlers: list = []
+        self.emitted: list = []
+        self.closed: bool = False
+        self.connected: bool = True
+        self.start_fails: bool = start_fails
+
+    def on(self, event, handler):
+        self.handlers.setdefault(event, []).append(handler)
+
+    def on_any(self, handler):
+        self.any_handlers.append(handler)
+
+    def start(self):
+        if self.start_fails:
+            raise RuntimeError("network down")
+        self.connected = True
+
+    def emit(self, event, *args):
+        self.emitted.append((event, args))
+
+    def close(self):
+        self.closed = True
+        self.connected = False
+
+    def simulate_event(self, event, *args):
+        for h in list(self.any_handlers):
+            h(event, *args)
+        for h in list(self.handlers.get(event, [])):
+            h(*args)
+
+
+class FastReconnectTest(unittest.TestCase):
+    def _create_bot(self, **cfg_overrides) -> tuple[Bot, list[FakeGameSocket]]:
+        cfg_vals = {
+            "fast_reconnect_enabled": True,
+            "fast_reconnect_max_attempts": 2,
+            "fast_reconnect_delay_sec": 0.01,
+            "socket_join_delay_sec": 0.01,
+            "silence_timeout_sec": 300.0,
+            "claim_double_xp": False,
+        }
+        cfg_vals.update(cfg_overrides)
+        cfg = types.SimpleNamespace(**cfg_vals)
+        from wvbot.game import GameState
+
+        bot = shell(
+            cfg=cfg,
+            store=StatusStore(),
+            stop_event=threading.Event(),
+            _restart=threading.Event(),
+            _banned=threading.Event(),
+            _session_over=threading.Event(),
+            state=GameState(),
+            auth=types.SimpleNamespace(ensure_token=lambda: "tok123"),
+            device_id="dev-test",
+            history=types.SimpleNamespace(record_game=lambda xp: None, get=lambda: {}),
+        )
+        bot.log_event = lambda *a, **k: None
+        bot._read_profile = lambda: None
+
+        sockets: list[FakeGameSocket] = []
+
+        def create_sock(token, url):
+            s = FakeGameSocket()
+            sockets.append(s)
+            return s
+
+        bot._create_game_socket = create_sock
+        return bot, sockets
+
+    def test_unexpected_disconnect_triggers_fast_reconnect(self) -> None:
+        bot, sockets = self._create_bot()
+        result = []
+
+        thread = threading.Thread(
+            target=lambda: result.append(bot._play_game("tok", "room-1", "http://server"))
+        )
+        thread.start()
+
+        # Wait for first socket setup
+        for _ in range(50):
+            if sockets and sockets[0].emitted:
+                break
+            time.sleep(0.02)
+
+        self.assertEqual(len(sockets), 1)
+        self.assertEqual(sockets[0].emitted[0][0], "mg:join-open-game")
+
+        # Simulate network drop
+        sockets[0].simulate_event("disconnect")
+
+        # Wait for fast reconnect to create second socket and rejoin
+        for _ in range(50):
+            if len(sockets) >= 2 and sockets[1].emitted:
+                break
+            time.sleep(0.02)
+
+        self.assertEqual(len(sockets), 2)
+        self.assertEqual(sockets[1].emitted[0][0], "mg:join-open-game")
+        self.assertEqual(sockets[1].emitted[0][1][0], {"miniGameId": "room-1"})
+        self.assertGreaterEqual(int(bot.store.get().get("reconnects") or 0), 1)
+
+        # Complete game with awards on reconnected socket
+        sockets[1].simulate_event("game-over-awards-available", {"playerAward": {"awardedTotalXp": 50}})
+        thread.join(timeout=3.0)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result, [True])
+
+    def test_fast_reconnect_disabled_exits(self) -> None:
+        bot, sockets = self._create_bot(fast_reconnect_enabled=False)
+        result = []
+
+        thread = threading.Thread(
+            target=lambda: result.append(bot._play_game("tok", "room-1", "http://server"))
+        )
+        thread.start()
+
+        for _ in range(50):
+            if sockets and sockets[0].emitted:
+                break
+            time.sleep(0.02)
+
+        sockets[0].simulate_event("disconnect")
+        thread.join(timeout=3.0)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(sockets), 1)
+        self.assertEqual(result, [True])
+
+    def test_fast_reconnect_exhausted_gives_up(self) -> None:
+        bot, sockets = self._create_bot(fast_reconnect_max_attempts=1)
+        failing_sockets = []
+
+        def failing_create_sock(token, url):
+            if not sockets:
+                s = FakeGameSocket()
+                sockets.append(s)
+                return s
+            s = FakeGameSocket(start_fails=True)
+            failing_sockets.append(s)
+            return s
+
+        bot._create_game_socket = failing_create_sock
+        result = []
+
+        thread = threading.Thread(
+            target=lambda: result.append(bot._play_game("tok", "room-1", "http://server"))
+        )
+        thread.start()
+
+        for _ in range(50):
+            if sockets and sockets[0].emitted:
+                break
+            time.sleep(0.02)
+
+        # Trigger disconnect; the rejoin socket will fail to start
+        sockets[0].simulate_event("disconnect")
+        thread.join(timeout=3.0)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(failing_sockets), 1)
+        self.assertEqual(result, [True])
 
 
 if __name__ == "__main__":

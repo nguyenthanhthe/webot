@@ -68,7 +68,7 @@ status_service() {
     [ -r "$entry/cmdline" ] || continue
     cmd=$(tr '\0' ' ' < "$entry/cmdline" 2>/dev/null || true)
     case "$cmd" in
-      *"run.py --mode protocol"*) running="yes (pid $pid)" ;;
+      *"run.py"*|*"wvbot"*) running="yes (pid $pid)" ;;
     esac
   done
   echo "bot: $running"
