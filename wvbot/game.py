@@ -324,6 +324,13 @@ class GameState:
         if not isinstance(data, dict):
             return
         self.phase = "started"
+        self.dead_ids = []
+        self.claimed_wolf_id = None
+        self.claimed_wolf_seat = None
+        self.day_votes = {}
+        self.night_votes = {}
+        self.lover_id = None
+        self.last_award = {}
         role = data.get("role")
         if isinstance(role, dict):
             self.role_id = str(role.get("id") or role.get("_id") or "")

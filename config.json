@@ -26,6 +26,8 @@
   "instant_kill": true,
   "prefer_8p_rooms": true,
   "strict_8p_only": false,
+  "stay_in_room": true,
+  "stay_in_room_timeout_sec": 60.0,
   "claim_double_xp": true,
   "reflex_chat_enabled": true,
   "chat_enabled": false,

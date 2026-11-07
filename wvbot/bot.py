@@ -626,10 +626,34 @@ class Bot:
         game_over = threading.Event()
         last_event = [time.time()]
         last_heartbeat = [time.time()]
+        last_game_over_time = [0.0]
         active_sock = [None]
+
+        def _process_game_award(current_sock: Any) -> None:
+            award = self.state.last_award
+            if not award:
+                return
+            xp = int(award.get("awardedTotalXp") or 0)
+            levels = int(award.get("awardedLevels") or 0)
+            stats = self.store.get()
+            self.store.update(
+                xp_total=int(stats.get("xp_total") or 0) + xp,
+                xp_last=xp,
+                games_played=int(stats.get("games_played") or 0) + 1,
+            )
+            self._read_profile()
+            self.log_event("xp", f"+{xp} xp" + (f" (+{levels} levels)" if levels else ""))
+            self.history.record_game(xp)
+            self.store.update(history=self.history.get())
+            if self.cfg.claim_double_xp and award.get("canClaimDoubleXp") and current_sock:
+                self._claim_double_xp(current_sock)
+            self.state.last_award = {}
 
         def handle(event: str, *args: Any) -> None:
             last_event[0] = time.time()
+            if event == "game-started":
+                last_game_over_time[0] = 0.0
+                self.store.update(status="playing")
             if time.time() - last_heartbeat[0] > 30.0:
                 self._touch_heartbeat()
                 last_heartbeat[0] = time.time()
@@ -682,7 +706,24 @@ class Bot:
         while not self.stop_event.is_set():
             if finished.wait(timeout=1.0):
                 if game_over.is_set():
-                    break
+                    _process_game_award(active_sock[0])
+                    if getattr(self.cfg, "stay_in_room", False):
+                        game_over.clear()
+                        finished.clear()
+                        self._clear_actions()
+                        self.state.phase = "lobby"
+                        self.store.update(status="staying in room", phase="lobby")
+                        room_label = (
+                            (self.store.get().get("room") or game_id)
+                            if hasattr(self, "store")
+                            else game_id
+                        )
+                        self.log_event("lobby", f"cắm phòng '{room_label}': ván xong, giữ nguyên kết nối chờ ván tiếp...")
+                        last_event[0] = time.time()
+                        last_game_over_time[0] = time.time()
+                        continue
+                    else:
+                        break
 
                 if (
                     disconnected.is_set()
@@ -752,9 +793,21 @@ class Bot:
             if time.time() - last_heartbeat[0] > 30.0:
                 self._touch_heartbeat()
                 last_heartbeat[0] = time.time()
+            if last_game_over_time[0] > 0.0:
+                stay_timeout = getattr(self.cfg, "stay_in_room_timeout_sec", 60.0)
+                if time.time() - last_game_over_time[0] > stay_timeout:
+                    room_label = (
+                        (self.store.get().get("room") or game_id)
+                        if hasattr(self, "store")
+                        else game_id
+                    )
+                    self.log_event("lobby", f"phòng '{room_label}' không bắt đầu ván mới sau {int(stay_timeout)}s - rời phòng tìm phòng khác")
+                    break
             if time.time() - last_event[0] > self.cfg.silence_timeout_sec:
                 self.log_event("warn", "no server event for a long time - restarting the game")
                 break
+
+        _process_game_award(active_sock[0])
 
         # Leaving the room has to be announced.  A socket that simply
         # disappears counts as "fleeing the village" and the server bans
@@ -768,26 +821,6 @@ class Bot:
         time.sleep(1.0)
         if active_sock[0]:
             active_sock[0].close()
-
-        award = self.state.last_award
-        if award:
-            xp = int(award.get("awardedTotalXp") or 0)
-            levels = int(award.get("awardedLevels") or 0)
-            stats = self.store.get()
-            self.store.update(
-                xp_total=int(stats.get("xp_total") or 0) + xp,
-                xp_last=xp,
-                games_played=int(stats.get("games_played") or 0) + 1,
-            )
-            # The account XP changed on the server, so the level and the
-            # projection have to be read again.
-            self._read_profile()
-            self.log_event("xp", f"+{xp} xp" + (f" (+{levels} levels)" if levels else ""))
-            # The counters survive a restart.
-            self.history.record_game(xp)
-            self.store.update(history=self.history.get())
-            if self.cfg.claim_double_xp and award.get("canClaimDoubleXp") and active_sock[0]:
-                self._claim_double_xp(active_sock[0])
 
         self.store.update(status="reconnecting")
         self.store.update(reconnects=int(self.store.get().get("reconnects") or 0) + 1)
@@ -1112,13 +1145,16 @@ class Bot:
         """
         if self.state.own_id() is not None:
             return
-        if not self._own_player_id:
+        own = getattr(self, "_own_player_id", None)
+        if not own:
             try:
-                self._own_player_id = self.api.get_own_player_id(self.device_id)
+                api = getattr(self, "api", None)
+                if api and hasattr(api, "get_own_player_id"):
+                    own = api.get_own_player_id(getattr(self, "device_id", ""))
+                    self._own_player_id = own
             except Exception as exc:  # noqa: BLE001 - advisory only
                 log.debug("could not read the player profile: %s", exc)
-                self._own_player_id = None
-        own = self._own_player_id
+                own = None
         if own:
             self.state.set_own_id(own)
             return
@@ -1324,13 +1360,16 @@ class Bot:
         The flag is cleared whenever a new phase starts, so the bot acts
         once per night and once per day.
         """
+        if not hasattr(self, "_acted_keys"):
+            self._acted_keys = set()
         if key in self._acted_keys:
             return True
         self._acted_keys.add(key)
         return False
 
     def _clear_actions(self) -> None:
-        self._acted_keys.clear()
+        if hasattr(self, "_acted_keys"):
+            self._acted_keys.clear()
 
     def _day_vote(self, sock: SocketIOClient) -> None:
         if self._acted("day-vote"):

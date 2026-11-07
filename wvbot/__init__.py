@@ -1,3 +1,3 @@
-"""Wolvesville custom-game farming bot enterprise (v1.0.4 - Turbo Vill-Win 3000 XP/h Edition)."""
+"""Wolvesville custom-game farming bot enterprise (v1.0.5 - Continuous Rematch & Stay-In-Room Edition)."""
 
-__version__ = "1.0.4"
+__version__ = "1.0.5"
