@@ -21,7 +21,13 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from wvbot.config import REFRESH_TOKEN_FILE, STATE_DIR
-from wvbot.farm import ROSTER_FILE, clean_name, load_roster
+from wvbot.farm import (
+    ROSTER_FILE,
+    clean_name,
+    load_roster,
+    remove_account_from_roster,
+    save_account_to_roster,
+)
 
 
 def _roster_path() -> Path:
@@ -58,72 +64,21 @@ def list_accounts() -> int:
 
 
 def add_account(name: str, refresh_token: str | None = None) -> int:
-    safe_name = clean_name(name)
-    if not safe_name:
-        print(f"Error: invalid account name '{name}'")
+    try:
+        save_account_to_roster(STATE_DIR, name, refresh_token)
+        print(f"Added '{clean_name(name)}' to roster.")
+        return 0
+    except Exception as exc:
+        print(f"Error adding account: {exc}")
         return 1
-
-    path = _roster_path()
-    data: dict[str, Any] = {"accounts": []}
-    if path.is_file():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            data = {"accounts": []}
-
-    accounts = data.setdefault("accounts", [])
-    for acc in accounts:
-        if acc.get("name") == safe_name:
-            print(f"Account '{safe_name}' already exists in roster.")
-            break
-    else:
-        accounts.append({"name": safe_name})
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        try:
-            os.chmod(path, 0o600)
-        except OSError:
-            pass
-        print(f"Added '{safe_name}' to roster.")
-
-    # Create isolated account directory
-    acc_dir = STATE_DIR / "accounts" / safe_name
-    acc_dir.mkdir(parents=True, exist_ok=True)
-
-    if refresh_token:
-        token_path = acc_dir / REFRESH_TOKEN_FILE
-        token_path.write_text(refresh_token.strip() + "\n", encoding="utf-8")
-        try:
-            os.chmod(token_path, 0o600)
-        except OSError:
-            pass
-        print(f"Stored refresh token in {token_path}")
-    return 0
 
 
 def remove_account(name: str) -> int:
-    safe_name = clean_name(name)
-    path = _roster_path()
-    if not path.is_file():
-        print("No roster file found.")
-        return 1
-
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        print(f"Error reading roster: {exc}")
-        return 1
-
-    accounts = data.get("accounts", [])
-    before = len(accounts)
-    accounts = [acc for acc in accounts if acc.get("name") != safe_name]
-    if len(accounts) == before:
-        print(f"Account '{safe_name}' not found in roster.")
-        return 1
-
-    data["accounts"] = accounts
-    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    print(f"Removed '{safe_name}' from roster.")
-    return 0
+    if remove_account_from_roster(STATE_DIR, name):
+        print(f"Removed '{clean_name(name)}' from roster.")
+        return 0
+    print(f"Account '{name}' not found or could not be removed.")
+    return 1
 
 
 def farm_status() -> int:

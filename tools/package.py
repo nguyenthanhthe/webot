@@ -48,6 +48,7 @@ MEMBERS = [
     (ROOT / "tools" / "probe_own_id.py", "probe_own_id.py"),
     (ROOT / "tools" / "probe_rewards.py", "probe_rewards.py"),
     (ROOT / "tools" / "roster.py", "roster.py"),
+    (ROOT / "tools" / "drill_watchdog.py", "drill_watchdog.py"),
     # The payload is shared with the Node/Playwright runner and lives at the
     # root of the package on the phone.
     (ROOT / "web" / "payload.js", "payload.js"),

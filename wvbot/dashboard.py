@@ -128,6 +128,16 @@ PAGE = """<!doctype html>
   button { background: #22272e; color: #e6e6e6; border: 1px solid #373e47; border-radius: 6px; padding: 5px 10px; font-size: 12px; font-family: inherit; cursor: pointer; }
   button:hover { border-color: #38bdf8; color: #38bdf8; }
   button.danger { border-color: #ef4444; color: #ef4444; }
+  input[type="text"], input[type="password"] {
+    background: #181b20; border: 1px solid #373e47; color: #e6e6e6;
+    border-radius: 6px; padding: 5px 9px; font-family: inherit; font-size: 12px;
+  }
+  input:focus { border-color: #38bdf8; outline: none; }
+  .badge-pill { font-size: 11px; padding: 2px 7px; border-radius: 4px; display: inline-block; font-weight: 500; }
+  .badge-pill.ready { background: #064e3b; color: #34d399; }
+  .badge-pill.missing { background: #78350f; color: #fde047; }
+  .badge-pill.active { background: #1e3a5f; color: #60a5fa; }
+  .badge-pill.inactive { background: #1e293b; color: #94a3b8; }
   table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 10px; }
   td, th { padding: 5px 8px; border-bottom: 1px solid #242930; text-align: left; }
   th { color: #8b949e; font-weight: normal; }
@@ -156,6 +166,22 @@ PAGE = """<!doctype html>
 
 <div class="sec-title">🤖 Active Bot Instances</div>
 <div class="grid" id="bot-grid"></div>
+
+<div class="sec-title" style="display:flex; justify-content:space-between; align-items:center;">
+  <span>📋 Farm Roster & Accounts</span>
+  <button onclick="toggleAddForm()" style="background:#064e3b; border-color:#059669; color:#34d399;">+ Add Bot</button>
+</div>
+<div id="add-account-panel" style="display:none; background:#181b20; border:1px solid #282e38; border-radius:8px; padding:12px; margin-bottom:16px;">
+  <div style="font-weight:bold; margin-bottom:8px; font-size:13px; color:#38bdf8;">Add Account to Roster</div>
+  <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+    <input type="text" id="new-acc-name" placeholder="Account Name (e.g. bot2)" style="width:160px;">
+    <input type="password" id="new-acc-token" placeholder="Refresh Token (optional / paste token)" style="flex:1; min-width:220px;">
+    <button onclick="submitAddAccount()" style="background:#0284c7; border-color:#38bdf8; color:#fff;">Save & Add</button>
+    <button onclick="toggleAddForm()">Cancel</button>
+  </div>
+  <div id="add-acc-msg" style="font-size:11px; margin-top:6px; color:#94a3b8;"></div>
+</div>
+<table id="roster-table" style="margin-bottom:24px;"></table>
 
 <div class="sec-title">🎮 Current Room Players</div>
 <table class="levels" id="levels"></table>
@@ -257,6 +283,92 @@ async function fetchEvents() {
   } catch (_) {}
 }
 
+function toggleAddForm() {
+  const panel = document.getElementById('add-account-panel');
+  panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+  document.getElementById('add-acc-msg').innerText = '';
+}
+
+async function submitAddAccount() {
+  const name = document.getElementById('new-acc-name').value.trim();
+  const token = document.getElementById('new-acc-token').value.trim();
+  const msg = document.getElementById('add-acc-msg');
+  if (!name) {
+    msg.innerText = 'Please provide an account name.';
+    msg.style.color = '#ef4444';
+    return;
+  }
+  msg.innerText = 'Adding account...';
+  msg.style.color = '#38bdf8';
+  try {
+    const res = await fetch('/api/accounts', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name, refresh_token: token || null})
+    });
+    const data = await res.json();
+    if (res.ok && data.ok) {
+      msg.innerText = `Added account '${data.name}' successfully!`;
+      msg.style.color = '#34d399';
+      document.getElementById('new-acc-name').value = '';
+      document.getElementById('new-acc-token').value = '';
+      setTimeout(() => { toggleAddForm(); }, 1200);
+      fetchAccounts();
+      pollFarm();
+    } else {
+      msg.innerText = `Error: ${data.error || 'failed to add'}`;
+      msg.style.color = '#ef4444';
+    }
+  } catch (err) {
+    msg.innerText = `Error: ${err.message}`;
+    msg.style.color = '#ef4444';
+  }
+}
+
+async function removeAccount(name) {
+  if (!confirm(`Are you sure you want to remove account '${name}' from roster?`)) return;
+  try {
+    const res = await fetch(`/api/accounts/${encodeURIComponent(name)}`, {
+      method: 'DELETE'
+    });
+    if (res.ok) {
+      fetchAccounts();
+      pollFarm();
+    }
+  } catch (_) {}
+}
+
+async function fetchAccounts() {
+  try {
+    const res = await fetch('/api/accounts');
+    if (res.ok) {
+      const data = await res.json();
+      const accounts = data.accounts || [];
+      const tbl = document.getElementById('roster-table');
+      if (!accounts.length) {
+        tbl.innerHTML = '<tr><td colspan="5" style="color:#64748b">No accounts configured</td></tr>';
+        return;
+      }
+      tbl.innerHTML = '<tr><th>Account</th><th>Token</th><th>Farm Slot</th><th>Status</th><th>Actions</th></tr>' +
+        accounts.map(a => {
+          const tokBadge = a.ready
+            ? '<span class="badge-pill ready">Ready</span>'
+            : '<span class="badge-pill missing">Missing</span>';
+          const actBadge = a.active
+            ? '<span class="badge-pill active">Running</span>'
+            : '<span class="badge-pill inactive">Inactive</span>';
+          return `<tr>
+            <td style="font-weight:bold; color:#f1f5f9;">${a.name}</td>
+            <td>${tokBadge}</td>
+            <td>${actBadge}</td>
+            <td style="color:#94a3b8;">${a.status}</td>
+            <td><button class="danger" onclick="removeAccount('${a.name}')">Remove</button></td>
+          </tr>`;
+        }).join('');
+    }
+  } catch (_) {}
+}
+
 function initSSE() {
   const badge = document.getElementById('conn-badge');
   if (!window.EventSource) {
@@ -295,11 +407,63 @@ async function pollFarm() {
 
 initSSE();
 pollFarm();
+fetchAccounts();
 setInterval(fetchEvents, 4000);
+setInterval(fetchAccounts, 6000);
 </script>
 </body>
 </html>
 """
+
+
+def get_accounts_summary(farm_root: Path, farm: Any = None) -> list[dict[str, Any]]:
+    """Return sanitized account list for API/dashboard (no tokens exposed)."""
+    from .config import REFRESH_TOKEN_FILE
+    from .farm import load_roster
+
+    try:
+        roster = load_roster(farm_root)
+    except Exception:
+        roster = [{"name": "main"}]
+
+    active_slots: dict[str, Any] = {}
+    if farm is not None and hasattr(farm, "_slots"):
+        for slot in getattr(farm, "_slots", []):
+            active_slots[slot.name] = slot
+
+    result: list[dict[str, Any]] = []
+    for entry in roster:
+        name = str(entry.get("name") or "main")
+        acc_dir = (
+            farm_root / "accounts" / name
+            if name != "main" or (farm_root / "accounts" / name).is_dir()
+            else farm_root
+        )
+        token_path = acc_dir / REFRESH_TOKEN_FILE
+        has_token = False
+        if token_path.is_file():
+            try:
+                has_token = len(token_path.read_text(encoding="utf-8").strip()) > 0
+            except OSError:
+                pass
+        if not has_token and entry.get("refresh_token"):
+            has_token = len(str(entry.get("refresh_token")).strip()) > 0
+
+        slot = active_slots.get(name)
+        status = slot.status if slot is not None else ("inactive" if farm is not None else "ready")
+
+        item: dict[str, Any] = {
+            "name": name,
+            "ready": has_token,
+            "has_token": has_token,
+            "active": slot is not None,
+            "status": status,
+        }
+        for k, v in entry.items():
+            if k not in ("refresh_token", "name"):
+                item[k] = v
+        result.append(item)
+    return result
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -324,7 +488,42 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_OPTIONS(self) -> None:  # noqa: N802
-        self._send(204, b"", "text/plain")
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        if self.path.startswith("/api/accounts"):
+            name = ""
+            if self.path.startswith("/api/accounts/"):
+                name = self.path[len("/api/accounts/") :].split("?")[0].strip()
+            elif "?" in self.path:
+                for part in self.path.split("?", 1)[1].split("&"):
+                    if part.startswith("name="):
+                        name = part[5:].strip()
+            if not name:
+                self._send(400, b'{"error":"missing account name"}', "application/json")
+                return
+            from .config import STATE_DIR
+            from .farm import remove_account_from_roster
+
+            root = (
+                self.farm.farm_root
+                if self.farm and getattr(self.farm, "farm_root", None)
+                else STATE_DIR
+            )
+            removed = remove_account_from_roster(root, name)
+            if self.farm is not None and hasattr(self.farm, "remove_account"):
+                self.farm.remove_account(name)
+            self._send(
+                200,
+                json.dumps({"ok": True, "name": name, "removed": removed}).encode(),
+                "application/json",
+            )
+            return
+        self._send(404, b'{"error":"not found"}', "application/json")
 
     def do_POST(self) -> None:  # noqa: N802
         length = int(self.headers.get("Content-Length") or 0)
@@ -360,6 +559,48 @@ class _Handler(BaseHTTPRequestHandler):
                     handled = bool(self.control(action))
             body = json.dumps({"ok": handled}).encode()
             self._send(200, body, "application/json")
+            return
+        elif self.path.startswith("/api/accounts") or kind in ("add_account", "remove_account"):
+            action = str(payload.get("action") or "").lower()
+            from .config import STATE_DIR
+            from .farm import remove_account_from_roster, save_account_to_roster
+
+            root = (
+                self.farm.farm_root
+                if self.farm and getattr(self.farm, "farm_root", None)
+                else STATE_DIR
+            )
+            name = str(payload.get("name") or "").strip()
+
+            if action in ("remove", "delete") or kind == "remove_account":
+                if not name:
+                    self._send(400, b'{"error":"missing account name"}', "application/json")
+                    return
+                removed = remove_account_from_roster(root, name)
+                if self.farm is not None and hasattr(self.farm, "remove_account"):
+                    self.farm.remove_account(name)
+                self._send(
+                    200,
+                    json.dumps({"ok": True, "name": name, "removed": removed}).encode(),
+                    "application/json",
+                )
+                return
+
+            token = payload.get("refresh_token")
+            if not name:
+                self._send(400, b'{"error":"missing account name"}', "application/json")
+                return
+            try:
+                entry = save_account_to_roster(root, name, token)
+                if self.farm is not None and hasattr(self.farm, "add_account"):
+                    self.farm.add_account(entry)
+                self._send(
+                    200,
+                    json.dumps({"ok": True, "name": entry.get("name")}).encode(),
+                    "application/json",
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._send(400, json.dumps({"error": str(exc)}).encode(), "application/json")
             return
         elif kind == "reward":
             action = str(payload.get("action") or "")
@@ -432,6 +673,18 @@ class _Handler(BaseHTTPRequestHandler):
                 ).encode()
             else:
                 body = b'{"bots":[],"count":0}'
+            self._send(200, body, "application/json")
+
+        elif self.path.startswith("/api/accounts"):
+            from .config import STATE_DIR
+
+            root = (
+                self.farm.farm_root
+                if self.farm and getattr(self.farm, "farm_root", None)
+                else STATE_DIR
+            )
+            accs = get_accounts_summary(root, self.farm)
+            body = json.dumps({"accounts": accs, "count": len(accs)}, indent=2).encode()
             self._send(200, body, "application/json")
 
         elif self.path.startswith("/api/status"):
