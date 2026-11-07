@@ -134,12 +134,20 @@ value:
 
 * **The test suite grows with the bot** - every protocol fix lands with
   a test first (the suite lives in `tests/`, stdlib only).
-* **Rejoin the same room after a network blip** - today an unexpected
-  disconnect ends the session and the bot hunts a new room; the game
-  it left behind may still pay its award.  Whether the server puts a
-  rejoining player back into the running game needs a **live probe**
-  (`tools/probe_join.py` is the scaffold) - and a probe costs joins,
-  so it runs in an idle window, not mid-day.
+8. ~~**Rejoin the same room after a network blip**~~ - **done (v1.0.1).**
+   An unexpected socket disconnect mid-game triggers fast rejoin
+   (`fast_reconnect_max_attempts` and exponential delay) into the same
+   running match rather than forfeiting the room. Game state synchronizes
+   via `game-reconnect-set-players` and resumes seamlessly without penalty.
+9. ~~**Chat payload JSON protocol fix**~~ - **done (v1.0.1).**
+   Fixed `chat()` to serialize payloads as JSON strings per official client
+   wire specifications.
+10. ~~**Service watchdog multi-mode hardening**~~ - **done (v1.0.1).**
+    Updated `job_watchdog.sh`, `service_runner.sh`, and `bot_ctl.sh` process
+    matching patterns to cover all execution modes (`farm`, `protocol`, `-m wvbot`).
+
+What could come next, in the order of value:
+
 * **A kill drill for the hang watchdog** - write a stale heartbeat by
   hand, run `sh ~/service/watchdog.sh` and watch it restart a hung
   bot.  The drill ends a game ungracefully (SIGKILL), so it also runs
@@ -147,10 +155,6 @@ value:
 * **A second config profile** for a second account (the dual-instance
   idea without the second session in the same room).  Needs the
   operator: a second manual browser login produces the token.
-* **Chat behaviour** - the payload and the event exist, the bot stays
-  silent on purpose for now; if it ever chats, the messages need the
-  same randomised pacing as the votes (the queue already keeps the
-  pause off the reader thread).
 
 ## What we deliberately do not copy
 
