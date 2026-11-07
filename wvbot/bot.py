@@ -40,6 +40,7 @@ from .history import XpHistory
 from .http_client import HttpClient
 from .rewards import Rewards
 from .sio import SocketIOClient
+from .stream import StreamHub
 from .updates import UpdateWatcher
 
 log = logging.getLogger("wvbot.bot")
@@ -77,6 +78,7 @@ class Bot:
         self.account_dir = account_dir
         self.start_web_dashboard = start_web_dashboard
         self.store = StatusStore()
+        self.hub = StreamHub()
         self.http = HttpClient(
             timeout=cfg.request_timeout_sec,
             max_retries=cfg.max_retries,
@@ -154,6 +156,11 @@ class Bot:
     def log_event(self, kind: str, message: str, **extra: Any) -> None:
         log.info("%s", message)
         self.store.add_event(kind, message, **extra)
+        if hasattr(self, "hub") and self.hub is not None:
+            try:
+                self.hub.publish("event", {"kind": kind, "message": message, "ts": time.time(), **extra})
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # pacing
@@ -362,6 +369,7 @@ class Bot:
                 control=self._control,
                 reward=self._reward,
                 rooms=self._room_probe,
+                hub=self.hub,
             )
         self.log_event("bot", f"bot starting (v{__version__})")
         self.store.update(version=__version__)
