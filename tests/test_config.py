@@ -35,6 +35,11 @@ class StatePathTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 state_path(bad)
 
+    def test_state_path_with_custom_base(self) -> None:
+        custom_base = Path("/custom/state/dir")
+        path = state_path("state.json", base=custom_base)
+        self.assertEqual(path, custom_base / "state.json")
+
 
 class CoerceTest(unittest.TestCase):
     def test_bool(self) -> None:
@@ -121,6 +126,17 @@ class LoadConfigTest(unittest.TestCase):
         self.assertEqual(cfg.game_base_url, config_mod.GAME_URL)
         cfg.use_asia_host = True
         self.assertEqual(cfg.game_base_url, config_mod.GAME_URL_ASIA)
+
+    def test_load_config_with_custom_base(self) -> None:
+        import json
+        acc_dir = self.state_dir / "accounts" / "bot1"
+        acc_dir.mkdir(parents=True, exist_ok=True)
+        (acc_dir / "config.json").write_text(json.dumps({"language": "vi"}), encoding="utf-8")
+        (acc_dir / "refresh_token.txt").write_text("custom-token\n", encoding="utf-8")
+        cfg = load_config(base=acc_dir)
+        self.assertEqual(cfg.language, "vi")
+        self.assertEqual(cfg.refresh_token, "custom-token")
+
 
 
 if __name__ == "__main__":

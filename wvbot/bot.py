@@ -40,6 +40,7 @@ from .history import XpHistory
 from .http_client import HttpClient
 from .rewards import Rewards
 from .sio import SocketIOClient
+from .stream import StreamHub
 from .updates import UpdateWatcher
 
 log = logging.getLogger("wvbot.bot")
@@ -67,15 +68,23 @@ PROTECTOR_ROLES = {
 
 
 class Bot:
-    def __init__(self, cfg: Config):
+    def __init__(
+        self,
+        cfg: Config,
+        account_dir: Path | None = None,
+        start_web_dashboard: bool = True,
+    ):
         self.cfg = cfg
+        self.account_dir = account_dir
+        self.start_web_dashboard = start_web_dashboard
         self.store = StatusStore()
+        self.hub = StreamHub()
         self.http = HttpClient(
             timeout=cfg.request_timeout_sec,
             max_retries=cfg.max_retries,
             token_provider=self._refresh_cf_jwt,
         )
-        self.auth = AuthManager(cfg, self.http)
+        self.auth = AuthManager(cfg, self.http, account_dir=account_dir)
         self.api = GameApi(cfg, self.http, self.auth.auth_headers)
         self.state = GameState()
         self.policy = Policy(cfg)
@@ -99,7 +108,7 @@ class Bot:
         # acts once and not on every repeated server event.
         self._acted_keys: set[str] = set()
         # The XP counters survive a restart.
-        self.history = XpHistory(state_path(cfg.state_file.replace(".json", "_history.json")))
+        self.history = XpHistory(self._state(cfg.state_file.replace(".json", "_history.json")))
         # When the profile was read the last time.
         self._last_profile_read = 0.0
         # Watches the game for a patch that could break the protocol.
@@ -110,9 +119,13 @@ class Bot:
         # marker only in RAM would restart the bot in a tight loop.
         self._last_restart_day = self._load_restart_day()
 
+    def _state(self, name: str) -> Path:
+        base = getattr(self, "account_dir", None)
+        return state_path(name, base=base)
+
     # ------------------------------------------------------------------
     def _load_device_id(self) -> str:
-        path = state_path("device_id.txt")
+        path = self._state("device_id.txt")
         if path.is_file():
             value = path.read_text(encoding="utf-8").strip()
             if value:
@@ -143,6 +156,11 @@ class Bot:
     def log_event(self, kind: str, message: str, **extra: Any) -> None:
         log.info("%s", message)
         self.store.add_event(kind, message, **extra)
+        if hasattr(self, "hub") and self.hub is not None:
+            try:
+                self.hub.publish("event", {"kind": kind, "message": message, "ts": time.time(), **extra})
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # pacing
@@ -217,13 +235,13 @@ class Bot:
         heartbeat file is the difference between hung and paused.
         """
         try:
-            state_path("heartbeat.txt").write_text(f"{time.time()}\n", encoding="utf-8")
+            self._state("heartbeat.txt").write_text(f"{time.time()}\n", encoding="utf-8")
         except OSError as exc:
             log.warning("could not write the heartbeat: %s", exc)
 
     def _load_restart_day(self) -> str:
         try:
-            path = state_path("restart_day.txt")
+            path = self._state("restart_day.txt")
             if path.is_file():
                 return path.read_text(encoding="utf-8").strip()
         except OSError:
@@ -232,7 +250,7 @@ class Bot:
 
     def _save_restart_day(self, day: str) -> None:
         try:
-            state_path("restart_day.txt").write_text(day + "\n", encoding="utf-8")
+            self._state("restart_day.txt").write_text(day + "\n", encoding="utf-8")
         except OSError as exc:
             log.warning("could not record the restart day: %s", exc)
 
@@ -343,14 +361,16 @@ class Bot:
         return True
 
     def run(self) -> None:
-        start_dashboard(
-            self.store,
-            self.cfg.dashboard_host,
-            self.cfg.dashboard_port,
-            control=self._control,
-            reward=self._reward,
-            rooms=self._room_probe,
-        )
+        if self.start_web_dashboard:
+            start_dashboard(
+                self.store,
+                self.cfg.dashboard_host,
+                self.cfg.dashboard_port,
+                control=self._control,
+                reward=self._reward,
+                rooms=self._room_probe,
+                hub=self.hub,
+            )
         self.log_event("bot", f"bot starting (v{__version__})")
         self.store.update(version=__version__)
         self.history.record_session()
@@ -798,13 +818,13 @@ class Bot:
 
     def _load_claim_marker(self) -> str:
         try:
-            return state_path("daily_claim.txt").read_text(encoding="utf-8").strip()
+            return self._state("daily_claim.txt").read_text(encoding="utf-8").strip()
         except OSError:
             return ""
 
     def _save_claim_marker(self, value: str) -> None:
         try:
-            state_path("daily_claim.txt").write_text(value + "\n", encoding="utf-8")
+            self._state("daily_claim.txt").write_text(value + "\n", encoding="utf-8")
         except OSError as exc:
             log.warning("could not record the daily claim attempt: %s", exc)
 

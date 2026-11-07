@@ -40,7 +40,7 @@ if ANDROID_HOME.is_dir():
 REFRESH_TOKEN_FILE = "refresh_token.txt"
 
 
-def state_path(name: str) -> Path:
+def state_path(name: str, base: Path | None = None) -> Path:
     """Return a path inside the state directory for a plain file name.
 
     ``name`` must be a bare file name: separators and parent references are
@@ -55,7 +55,8 @@ def state_path(name: str) -> Path:
         or Path(name).name != name
     ):
         raise ValueError(f"not a valid file name: {name!r}")
-    return STATE_DIR / name
+    root = base if base is not None else STATE_DIR
+    return root / name
 
 
 @dataclass
@@ -168,12 +169,13 @@ def _coerce(current: Any, raw: str) -> Any:
     return raw
 
 
-def load_config(config_file: str | None = None) -> Config:
+def load_config(config_file: str | None = None, base: Path | None = None) -> Config:
     cfg = Config()
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    root = base if base is not None else STATE_DIR
+    root.mkdir(parents=True, exist_ok=True)
 
     name = config_file or os.environ.get("WV_BOT_CONFIG", "config.json")
-    cfg_path = state_path(name)
+    cfg_path = state_path(name, base=root)
     if cfg_path.is_file():
         with open(cfg_path, "r", encoding="utf-8") as fh:
             data = json.load(fh)
@@ -189,7 +191,7 @@ def load_config(config_file: str | None = None) -> Config:
     # A cf_jwt file wins over the inline value when it exists: the external
     # Turnstile helper refreshes it in place.
     try:
-        jwt_file = state_path(cfg.cf_jwt_file)
+        jwt_file = state_path(cfg.cf_jwt_file, base=root)
     except ValueError:
         jwt_file = None
     if jwt_file is not None and jwt_file.is_file():
@@ -200,7 +202,7 @@ def load_config(config_file: str | None = None) -> Config:
     # The refresh token lives in its own file (mode 600) so it never ends
     # up in a config file that gets copied around.
     try:
-        refresh_file = state_path(REFRESH_TOKEN_FILE)
+        refresh_file = state_path(REFRESH_TOKEN_FILE, base=root)
     except ValueError:
         refresh_file = None
     if refresh_file is not None and refresh_file.is_file():

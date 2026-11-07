@@ -45,9 +45,10 @@ def _jwt_exp(token: str) -> int | None:
 
 
 class AuthManager:
-    def __init__(self, cfg: Config, http: HttpClient):
+    def __init__(self, cfg: Config, http: HttpClient, account_dir: Path | None = None):
         self.cfg = cfg
         self.http = http
+        self.account_dir = account_dir
         self.id_token: str | None = None
         self.refresh_token: str | None = cfg.refresh_token or None
         self.cf_jwt: str | None = cfg.cf_jwt or None
@@ -59,7 +60,7 @@ class AuthManager:
         from .config import state_path
 
         try:
-            path = state_path(self.cfg.cf_jwt_file)
+            path = state_path(self.cfg.cf_jwt_file, base=self.account_dir)
         except ValueError:
             return self.cf_jwt
         if path.is_file():
@@ -157,7 +158,7 @@ class AuthManager:
         try:
             from .config import REFRESH_TOKEN_FILE, state_path
 
-            path = state_path(REFRESH_TOKEN_FILE)
+            path = state_path(REFRESH_TOKEN_FILE, base=self.account_dir)
             path.write_text(token + "\n", encoding="utf-8")
             try:
                 import os

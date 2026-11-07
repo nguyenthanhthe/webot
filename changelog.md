@@ -9,6 +9,26 @@ and the project uses [semantic versioning](https://semver.org/).
 
 Planned work, see `docs/FEATURE-PLAN.md` for the full list.
 
+## [1.0.0] - 2026-11-07
+
+The Enterprise release: from a single bot to a multi-account autonomous farm.
+
+### Added
+
+- **Multi-Account Farm Supervisor (`wvbot.farm`)**: Runs and supervises
+  isolated bot threads from `accounts.json`, with per-account state directories,
+  automatic crash recovery, and thread isolation.
+- **Enterprise Dashboard v2 with Real-Time SSE**: `/api/stream` pushes live status
+  and events via Server-Sent Events without polling; multi-bot overview grid
+  with individual status pills, cards, and per-bot control actions.
+- **Roster Management CLI (`tools/roster.py`)**: 1-click CLI to list, add,
+  remove, and inspect accounts in `accounts.json`.
+- **Per-Account State Isolation**: `state_path(name, base=...)` and
+  `load_config(base=...)` allow isolated credentials and state directories.
+- **Docker & Docker Compose**: Fully headless, containerized runtime with
+  healthcheck for servers or cloud VMs.
+- **GitHub Actions CI**: Automated test matrix across Python versions.
+
 ## [0.0.6] - 2026-11-07
 
 Token renewal and credential resilience hardening.

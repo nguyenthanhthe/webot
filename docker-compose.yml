@@ -1,0 +1,14 @@
+version: "3.8"
+
+services:
+  wvbot-farm:
+    build: .
+    container_name: wvbot-farm
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    volumes:
+      - ./data:/data
+    environment:
+      - WV_BOT_FARM=1
+      - WV_BOT_LOG_LEVEL=INFO

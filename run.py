@@ -45,7 +45,7 @@ def _wake_lock() -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Wolvesville bot")
-    parser.add_argument("--mode", choices=["web", "protocol"], default="protocol")
+    parser.add_argument("--mode", choices=["web", "protocol", "farm"], default="protocol")
     args = parser.parse_args()
 
     os.chdir(ROOT)
@@ -61,6 +61,9 @@ def main() -> int:
         from wvbot.webbot import main as web_main
 
         return web_main()
+
+    if args.mode == "farm":
+        os.environ["WV_BOT_FARM"] = "1"
 
     from wvbot.__main__ import main as protocol_main
 
