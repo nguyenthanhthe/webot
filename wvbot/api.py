@@ -110,6 +110,9 @@ class GameApi:
         for room in self.list_custom_games():
             if not isinstance(room, dict):
                 continue
+            if room.get("regularXp") is False:
+                # Skip unbalanced custom games: Wolvesville awards 0 XP for them
+                continue
             name = self.fold(self._room_name(room))
             if not name:
                 continue

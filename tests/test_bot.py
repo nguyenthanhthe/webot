@@ -1040,6 +1040,20 @@ class TurboVillWinFarmTest(unittest.TestCase):
         self.assertIsNotNone(picked)
         self.assertEqual(picked["gameId"], "room-8p")
 
+    def test_pick_room_prioritizes_tf_duration(self) -> None:
+        cfg = types.SimpleNamespace(
+            prefer_small_rooms=True,
+            prefer_8p_rooms=True,
+        )
+        bot = shell(cfg=cfg)
+        rooms = [
+            {"gameId": "room-normal", "name": "Vill Win Normal", "dayDiscussionDurationInMs": 60000, "playerCount": 10},
+            {"gameId": "room-tf", "name": "Vill Win Fast", "dayDiscussionDurationInMs": 15000, "playerCount": 5},
+        ]
+        picked = bot._pick_room(rooms)
+        self.assertIsNotNone(picked)
+        self.assertEqual(picked["gameId"], "room-tf")
+
     def test_wolf_self_claim_emits_seat_number(self) -> None:
         state = types.SimpleNamespace(
             is_wolf=True,

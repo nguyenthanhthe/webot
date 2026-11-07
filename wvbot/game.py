@@ -30,9 +30,9 @@ log = logging.getLogger("wvbot.game")
 
 WOLF_TEAMS = {"WEREWOLF", "WOLF", "EVIL", "WEREWOLVES"}
 
-# Fast regex for detecting wolf claims in chat (e.g. "5 w", "w 5", "5 wolf", "im 5 w", "5 ww", "ww 5", "s5 w", "seat 5 ww", "14 is ww")
+# Fast regex for detecting wolf claims in chat (e.g. "5 w", "w 5", "5 wolf", "im 5 w", "5 ww", "ww 5", "s5 w", "seat 5 ww", "14 is ww", "4 red")
 WOLF_CLAIM_RE = re.compile(
-    r"(?:^|\b)(?:(?:im|i\s*am|me)\s+)?(?:(?:seat|s)?\s*(\d{1,2})[\s:=]*(?:is\s+)?(?:w|ww|wolf|werewolf|m|soi|ma)\b|(?:w|ww|wolf|werewolf|m|soi|ma)[\s:=]*(?:is\s+)?(?:seat|s)?\s*(\d{1,2})\b)",
+    r"(?:^|\b)(?:(?:im|i\s*am|me)\s+)?(?:(?:seat|s)?\s*(\d{1,2})[\s:=]*(?:is\s+)?(?:w|ww|wolf|werewolf|m|soi|ma|red)\b|(?:w|ww|wolf|werewolf|m|soi|ma|red)[\s:=]*(?:is\s+)?(?:seat|s)?\s*(\d{1,2})\b)",
     re.IGNORECASE,
 )
 
@@ -460,10 +460,17 @@ class Policy:
             for player in state.alive:
                 if player.id == author or player.id == state.own_id():
                     continue
-                if player.id == author:
-                    continue
                 if player.username and player.username.lower() in lowered:
                     counts[player.id] = counts.get(player.id, 0) + 1
+                    continue
+                if player.grid_idx is not None:
+                    seat_num = str(player.grid_idx + 1)
+                    seat_re = (
+                        r"\b(?:vote|go|on|sus|push)\s+" + seat_num + r"\b|"
+                        r"\b" + seat_num + r"\s+(?:sus|evil|bad|fake|is\s+evil|is\s+bad)\b"
+                    )
+                    if re.search(seat_re, lowered):
+                        counts[player.id] = counts.get(player.id, 0) + 1
         return counts
 
     def vote_target(self, state: GameState) -> Any | None:
