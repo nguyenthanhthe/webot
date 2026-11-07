@@ -32,7 +32,7 @@ WOLF_TEAMS = {"WEREWOLF", "WOLF", "EVIL", "WEREWOLVES"}
 
 # Fast regex for detecting wolf claims in chat (e.g. "5 w", "w 5", "5 wolf", "im 5 w")
 WOLF_CLAIM_RE = re.compile(
-    r"(?:^|\b)(?:(?:im|i\s*am)\s+)?(?:(\d{1,2})\s*(?:w|wolf)\b|(?:w|wolf)\s*(\d{1,2})\b)",
+    r"(?:^|\b)(?:(?:im|i\s*am)\s+)?(?:(\d{1,2})\s*(?:w|wolf|m)\b|(?:w|wolf|m)\s*(\d{1,2})\b)",
     re.IGNORECASE,
 )
 
@@ -175,10 +175,21 @@ class GameState:
         return None
 
     def _check_wolf_claim(self, data: dict[str, Any]) -> None:
-        """Parse chat message for wolf claims (e.g. '5 w', 'w 5', 'im wolf')."""
+        """Parse chat message for wolf claims (e.g. '5 w', 'w 5', '5 m', 'm', 'im wolf')."""
         msg = str(data.get("msg") or "").strip()
         if not msg:
             return
+        author_id = data.get("authorId")
+        clean = msg.lower().strip()
+        # In 'WW Say M' 8-player rooms, werewolves claim simply by saying 'm' or 'm.' or 'w'
+        if clean in ("m", "m.", "w", "ww", "soi", "im wolf", "i am wolf", "im w", "i am w", "im m", "i am m", "me wolf", "wolf here"):
+            if author_id is not None and author_id != self.own_id():
+                author = self.by_id(author_id)
+                if author and author.is_alive:
+                    self.claimed_wolf_id = author.id
+                    self.claimed_wolf_seat = (author.grid_idx + 1) if author.grid_idx >= 0 else None
+                    log.info("author wolf claim registered: player %s (%s) seat %s msg=%r", author.username, author.id, self.claimed_wolf_seat, msg)
+                    return
         m = WOLF_CLAIM_RE.search(msg)
         if m:
             seat_str = m.group(1) or m.group(2)
@@ -192,15 +203,6 @@ class GameState:
                     return
             except (ValueError, TypeError):
                 pass
-        clean = msg.lower().strip()
-        if clean in ("im wolf", "i am wolf", "im w", "i am w", "me wolf", "wolf here"):
-            author_id = data.get("authorId")
-            if author_id is not None:
-                author = self.by_id(author_id)
-                if author and author.is_alive:
-                    self.claimed_wolf_id = author.id
-                    self.claimed_wolf_seat = (author.grid_idx + 1) if author.grid_idx >= 0 else None
-                    log.info("author wolf claim registered: player %s (%s)", author.username, author.id)
 
     @property
     def alive(self) -> list[Player]:
@@ -322,6 +324,13 @@ class GameState:
         if not isinstance(data, dict):
             return
         self.phase = "started"
+        self.dead_ids = []
+        self.claimed_wolf_id = None
+        self.claimed_wolf_seat = None
+        self.day_votes = {}
+        self.night_votes = {}
+        self.lover_id = None
+        self.last_award = {}
         role = data.get("role")
         if isinstance(role, dict):
             self.role_id = str(role.get("id") or role.get("_id") or "")

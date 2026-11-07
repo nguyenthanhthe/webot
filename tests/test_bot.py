@@ -871,6 +871,40 @@ class FastReconnectTest(unittest.TestCase):
         self.assertEqual(len(failing_sockets), 1)
         self.assertEqual(result, [True])
 
+    def test_stay_in_room_keeps_socket_open_after_game_over(self) -> None:
+        bot, sockets = self._create_bot(stay_in_room=True)
+        result = []
+
+        thread = threading.Thread(
+            target=lambda: result.append(bot._play_game("tok", "room-1", "http://server"))
+        )
+        thread.start()
+
+        for _ in range(50):
+            if sockets and sockets[0].emitted:
+                break
+            time.sleep(0.02)
+
+        # Game over with awards
+        sockets[0].simulate_event("game-over-awards-available", {"playerAward": {"awardedTotalXp": 80}})
+        time.sleep(0.1)
+
+        # Thread should still be running and staying in room (NOT exited)
+        self.assertTrue(thread.is_alive())
+        self.assertEqual(bot.store.get().get("status"), "staying in room")
+        self.assertEqual(int(bot.store.get().get("xp_last") or 0), 80)
+
+        # Verify mg:exit-game was NOT emitted yet
+        emitted_events = [e[0] for e in sockets[0].emitted]
+        self.assertNotIn("mg:exit-game", emitted_events)
+
+        # Stopping the bot causes clean exit
+        bot.stop_event.set()
+        thread.join(timeout=3.0)
+        self.assertFalse(thread.is_alive())
+        final_emitted = [e[0] for e in sockets[0].emitted]
+        self.assertIn("mg:exit-game", final_emitted)
+
 
 class RoleActionHandlersTest(unittest.TestCase):
     def test_reviver_action_queues_medium_event(self) -> None:
@@ -1118,6 +1152,194 @@ class TurboVillWinFarmTest(unittest.TestCase):
             "game-gunner-shoot-player",
             '{"targetPlayerId": "wolf-target"}',
         )
+
+    def test_wolf_self_claim_emits_m_in_say_m_rooms(self) -> None:
+        state = types.SimpleNamespace(
+            is_wolf=True,
+            own_seat=lambda: 3,
+            own_id=lambda: "bot-wolf-id",
+            claimed_wolf_id=None,
+            claimed_wolf_seat=None,
+        )
+        cfg = types.SimpleNamespace(
+            vill_win_mode=True,
+            wolf_self_claim=True,
+            turbo_mode=True,
+        )
+        fake_store = types.SimpleNamespace(
+            get=lambda: {"room": "WW Say M (E)"}
+        )
+        queued = []
+        chats = []
+        bot = shell(
+            state=state,
+            cfg=cfg,
+            store=fake_store,
+            _acted_keys=set(),
+            _queue_action=lambda name, low, high, act: queued.append((name, act)),
+            chat=lambda sock, msg: chats.append(msg),
+            log_event=mock.MagicMock(),
+        )
+        fake_sock = mock.MagicMock()
+        bot._wolf_self_claim(fake_sock)
+        self.assertEqual(len(queued), 1)
+        queued[0][1]()
+        self.assertIn("m", chats)
+
+    def test_strict_8p_only_rejects_16p_rooms(self) -> None:
+        cfg = types.SimpleNamespace(
+            strict_8p_only=True,
+            prefer_8p_rooms=True,
+            prefer_small_rooms=True,
+        )
+        bot = shell(cfg=cfg)
+        rooms_16p = [
+            {"name": "vill win 16p", "regularXp": True, "roles": ["r"] * 16, "playerCount": 10},
+        ]
+        picked = bot._pick_room(rooms_16p)
+        self.assertIsNone(picked)
+
+        rooms_with_8p = [
+            {"name": "vill win 16p", "regularXp": True, "roles": ["r"] * 16, "playerCount": 10},
+            {"name": "WW Say M", "regularXp": True, "roles": ["r"] * 8, "playerCount": 6},
+        ]
+        picked_8p = bot._pick_room(rooms_with_8p)
+        self.assertIsNotNone(picked_8p)
+        self.assertEqual(picked_8p["name"], "WW Say M")
+
+    def test_stay_in_room_keeps_socket_open_and_resets_on_next_game(self) -> None:
+        cfg_vals = {
+            "fast_reconnect_enabled": False,
+            "socket_join_delay_sec": 0.0,
+            "silence_timeout_sec": 300.0,
+            "claim_double_xp": False,
+            "stay_in_room": True,
+            "stay_in_room_timeout_sec": 0.3,
+        }
+        cfg = types.SimpleNamespace(**cfg_vals)
+        from wvbot.game import GameState
+
+        store = StatusStore()
+        bot = shell(
+            cfg=cfg,
+            store=store,
+            stop_event=threading.Event(),
+            _restart=threading.Event(),
+            _banned=threading.Event(),
+            _session_over=threading.Event(),
+            state=GameState(),
+            auth=types.SimpleNamespace(ensure_token=lambda: "tok123"),
+            device_id="dev-test",
+            history=types.SimpleNamespace(record_game=lambda xp: None, get=lambda: {}),
+        )
+        bot.log_event = lambda *a, **k: None
+        bot._read_profile = lambda: None
+        bot._update_alive = lambda: None
+        bot._maybe_chat = lambda *a: None
+        bot._night_action = lambda *a: None
+        bot._protector_action = lambda *a: None
+        bot._reviver_action = lambda *a: None
+        bot._investigator_action = lambda *a: None
+
+        sockets = []
+        def create_sock(token, url):
+            s = FakeGameSocket()
+            sockets.append(s)
+            return s
+        bot._create_game_socket = create_sock
+
+        results = []
+        thread = threading.Thread(
+            target=lambda: results.append(bot._play_game("tok", "room-1", "http://server"))
+        )
+        thread.start()
+
+        # Wait for socket join
+        for _ in range(50):
+            if sockets and sockets[0].emitted:
+                break
+            time.sleep(0.01)
+        self.assertEqual(len(sockets), 1)
+
+        # First game ends with awards
+        sockets[0].simulate_event("game-over-awards-available", {"playerAward": {"awardedTotalXp": 120}})
+        time.sleep(0.05)
+
+        # Bot must stay in room: no mg:exit-game emitted, store updated
+        emitted_events = [e[0] for e in sockets[0].emitted]
+        self.assertNotIn("mg:exit-game", emitted_events)
+        self.assertEqual(store.get().get("status"), "staying in room")
+        self.assertEqual(store.get().get("xp_last"), 120)
+
+        # Host starts second game on the SAME socket
+        sockets[0].simulate_event("game-started", {"role": {"id": "villager"}, "players": []})
+        time.sleep(0.05)
+        self.assertEqual(store.get().get("status"), "playing")
+        self.assertEqual(len(sockets), 1)  # No new socket created!
+
+        # Second game ends
+        sockets[0].simulate_event("game-over-awards-available", {"playerAward": {"awardedTotalXp": 80}})
+        time.sleep(0.05)
+        self.assertEqual(store.get().get("xp_last"), 80)
+        self.assertEqual(store.get().get("games_played"), 2)
+
+        # Wait for stay_in_room_timeout_sec (0.3s) to expire + exit sleep
+        thread.join(timeout=3.0)
+        self.assertFalse(thread.is_alive())
+        # Now mg:exit-game should have been emitted
+        emitted_events = [e[0] for e in sockets[0].emitted]
+        self.assertIn("mg:exit-game", emitted_events)
+
+    def test_stay_in_room_disabled_exits_immediately_on_game_over(self) -> None:
+        cfg_vals = {
+            "fast_reconnect_enabled": False,
+            "socket_join_delay_sec": 0.0,
+            "silence_timeout_sec": 300.0,
+            "claim_double_xp": False,
+            "stay_in_room": False,
+        }
+        cfg = types.SimpleNamespace(**cfg_vals)
+        from wvbot.game import GameState
+
+        store = StatusStore()
+        bot = shell(
+            cfg=cfg,
+            store=store,
+            stop_event=threading.Event(),
+            _restart=threading.Event(),
+            _banned=threading.Event(),
+            _session_over=threading.Event(),
+            state=GameState(),
+            auth=types.SimpleNamespace(ensure_token=lambda: "tok123"),
+            device_id="dev-test",
+            history=types.SimpleNamespace(record_game=lambda xp: None, get=lambda: {}),
+        )
+        bot.log_event = lambda *a, **k: None
+        bot._read_profile = lambda: None
+
+        sockets = []
+        def create_sock(token, url):
+            s = FakeGameSocket()
+            sockets.append(s)
+            return s
+        bot._create_game_socket = create_sock
+
+        results = []
+        thread = threading.Thread(
+            target=lambda: results.append(bot._play_game("tok", "room-1", "http://server"))
+        )
+        thread.start()
+
+        for _ in range(50):
+            if sockets and sockets[0].emitted:
+                break
+            time.sleep(0.01)
+
+        sockets[0].simulate_event("game-over-awards-available", {"playerAward": {"awardedTotalXp": 50}})
+        thread.join(timeout=2.0)
+        self.assertFalse(thread.is_alive())
+        emitted_events = [e[0] for e in sockets[0].emitted]
+        self.assertIn("mg:exit-game", emitted_events)
 
 
 if __name__ == "__main__":

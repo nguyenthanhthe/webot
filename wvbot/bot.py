@@ -298,7 +298,7 @@ class Bot:
             self.store.update(status="running")
 
     def _pick_room(self, rooms: list[dict[str, Any]]) -> dict[str, Any] | None:
-        """Choose a room, strictly prioritizing 8-player rooms over 16-player rooms.
+        """Choose a room, preferring the fast-rotating 8-player ones.
 
         Vill-win rooms pay full XP regardless of size, but an 8-player
         room turns around in 30-60 seconds compared to 4-5 minutes for
@@ -307,6 +307,34 @@ class Bot:
         """
         if not rooms:
             return None
+
+        def is_8p_room(room: dict[str, Any]) -> bool:
+            name = GameApi._room_name(room).lower()
+            max_p = 0
+            for key in ("maxPlayerCount", "maxPlayers", "playerLimit"):
+                if key in room:
+                    try:
+                        max_p = int(room[key] or 0)
+                        break
+                    except (TypeError, ValueError):
+                        pass
+            roles = room.get("roles")
+            roles_count = len(roles) if isinstance(roles, list) else 0
+            if 0 < max_p <= 8:
+                return True
+            if 0 < roles_count <= 8:
+                return True
+            if any(k in name for k in ("8p", "8 p", "8-p", " 8 ", "8player", "vw8", "vw 8", "say m", "ww say", "m only")):
+                return True
+            return False
+
+        if getattr(self.cfg, "strict_8p_only", False):
+            rooms = [r for r in rooms if is_8p_room(r)]
+            if not rooms:
+                return None
+
+        if len(rooms) == 1:
+            return rooms[0]
 
         def xp(room: dict[str, Any]) -> int:
             value = room.get("regularXp")
@@ -317,79 +345,32 @@ class Bot:
             except (TypeError, ValueError):
                 return 0
 
+        best = max(xp(room) for room in rooms)
+        if best <= 0:
+            top = list(rooms)
+        else:
+            top = [room for room in rooms if xp(room) >= best * 0.8]
+
         def size(room: dict[str, Any]) -> int:
             try:
                 return int(room.get("playerCount") or 0)
             except (TypeError, ValueError):
                 return 99
 
-        def is_8p_room(room: dict[str, Any]) -> bool:
-            # 1. If current count is already > 8, it cannot be an 8p room
-            if size(room) > 8:
-                return False
+        if getattr(self.cfg, "prefer_8p_rooms", True):
+            eight_p = [r for r in top if is_8p_room(r)]
+            if eight_p:
+                top = eight_p
 
-            # 2. Check if maxPlayerCount is already known
-            for key in ("maxPlayerCount", "maxPlayers", "playerLimit"):
-                if key in room and room[key]:
-                    try:
-                        return int(room[key]) <= 8
-                    except (TypeError, ValueError):
-                        pass
-
-            # 3. Query room settings via REST API (Wolvesville holds maxPlayerCount in settings)
-            room_id = GameApi._room_id(room)
-            if room_id and hasattr(self, "api") and hasattr(self.api, "get_game_settings"):
-                try:
-                    settings = self.api.get_game_settings(room_id)
-                    if isinstance(settings, dict) and "maxPlayerCount" in settings:
-                        max_p = int(settings["maxPlayerCount"] or 0)
-                        room["maxPlayerCount"] = max_p
-                        return 0 < max_p <= 8
-                except Exception as exc:
-                    log.debug("could not fetch settings for room %s: %s", room_id, exc)
-
-            # 4. Check name heuristics for explicit 8p markers
-            name = GameApi._room_name(room).lower()
-            if any(k in name for k in ("8p", "8 p", "8-p", " 8 ", "8player", "8 player", "vw8")):
-                return True
-
-            # 5. Check role deck count: if explicitly <= 8 roles
-            roles = room.get("roles")
-            roles_count = len(roles) if isinstance(roles, list) else 0
-            if 0 < roles_count <= 8:
-                return True
-
-            return False
-
-        # If prefer_8p_rooms is explicitly enabled, enforce strict 8p matching
-        if getattr(self.cfg, "prefer_8p_rooms", False):
-            eight_p = [r for r in rooms if is_8p_room(r)]
-            if not eight_p:
-                self.log_event("lobby", f"no 8-player room open (skipped {len(rooms)} non-8p room(s)), waiting...")
-                return None
-            candidates = eight_p
-        else:
-            candidates = list(rooms)
-
-        if len(candidates) == 1:
-            return candidates[0]
-
-        best = max(xp(room) for room in candidates)
-        if best <= 0:
-            top = list(candidates)
-        else:
-            top = [room for room in candidates if xp(room) >= best * 0.8]
-
-        if not getattr(self.cfg, "prefer_small_rooms", True):
+        if not self.cfg.prefer_small_rooms:
             return random.SystemRandom().choice(top)
 
-        # In 8p rooms, prefer the most filled room (closest to starting at 8, e.g. 5-7 players)
-        if getattr(self.cfg, "prefer_8p_rooms", False):
-            viable = [room for room in top if size(room) >= 4] or top
-            viable.sort(key=lambda r: size(r), reverse=True)
-            return viable[0]
+        # In Wolvesville, 7-10 players means the room has hit the 8-player start threshold
+        ready_to_start = [room for room in top if 7 <= size(room) <= 11]
+        if ready_to_start:
+            return random.SystemRandom().choice(ready_to_start)
 
-        # Legacy fallback when prefer_8p_rooms is not enabled
+        # In 8p rooms, 4-7 players means the room is about to start
         viable = [room for room in top if size(room) >= 4] or top
         smallest = min(size(room) for room in viable)
         small = [room for room in viable if size(room) <= smallest + 3]
@@ -645,10 +626,34 @@ class Bot:
         game_over = threading.Event()
         last_event = [time.time()]
         last_heartbeat = [time.time()]
+        last_game_over_time = [0.0]
         active_sock = [None]
+
+        def _process_game_award(current_sock: Any) -> None:
+            award = self.state.last_award
+            if not award:
+                return
+            xp = int(award.get("awardedTotalXp") or 0)
+            levels = int(award.get("awardedLevels") or 0)
+            stats = self.store.get()
+            self.store.update(
+                xp_total=int(stats.get("xp_total") or 0) + xp,
+                xp_last=xp,
+                games_played=int(stats.get("games_played") or 0) + 1,
+            )
+            self._read_profile()
+            self.log_event("xp", f"+{xp} xp" + (f" (+{levels} levels)" if levels else ""))
+            self.history.record_game(xp)
+            self.store.update(history=self.history.get())
+            if self.cfg.claim_double_xp and award.get("canClaimDoubleXp") and current_sock:
+                self._claim_double_xp(current_sock)
+            self.state.last_award = {}
 
         def handle(event: str, *args: Any) -> None:
             last_event[0] = time.time()
+            if event == "game-started":
+                last_game_over_time[0] = 0.0
+                self.store.update(status="playing")
             if time.time() - last_heartbeat[0] > 30.0:
                 self._touch_heartbeat()
                 last_heartbeat[0] = time.time()
@@ -701,7 +706,24 @@ class Bot:
         while not self.stop_event.is_set():
             if finished.wait(timeout=1.0):
                 if game_over.is_set():
-                    break
+                    _process_game_award(active_sock[0])
+                    if getattr(self.cfg, "stay_in_room", False):
+                        game_over.clear()
+                        finished.clear()
+                        self._clear_actions()
+                        self.state.phase = "lobby"
+                        self.store.update(status="staying in room", phase="lobby")
+                        room_label = (
+                            (self.store.get().get("room") or game_id)
+                            if hasattr(self, "store")
+                            else game_id
+                        )
+                        self.log_event("lobby", f"cắm phòng '{room_label}': ván xong, giữ nguyên kết nối chờ ván tiếp...")
+                        last_event[0] = time.time()
+                        last_game_over_time[0] = time.time()
+                        continue
+                    else:
+                        break
 
                 if (
                     disconnected.is_set()
@@ -771,9 +793,21 @@ class Bot:
             if time.time() - last_heartbeat[0] > 30.0:
                 self._touch_heartbeat()
                 last_heartbeat[0] = time.time()
+            if last_game_over_time[0] > 0.0:
+                stay_timeout = getattr(self.cfg, "stay_in_room_timeout_sec", 60.0)
+                if time.time() - last_game_over_time[0] > stay_timeout:
+                    room_label = (
+                        (self.store.get().get("room") or game_id)
+                        if hasattr(self, "store")
+                        else game_id
+                    )
+                    self.log_event("lobby", f"phòng '{room_label}' không bắt đầu ván mới sau {int(stay_timeout)}s - rời phòng tìm phòng khác")
+                    break
             if time.time() - last_event[0] > self.cfg.silence_timeout_sec:
                 self.log_event("warn", "no server event for a long time - restarting the game")
                 break
+
+        _process_game_award(active_sock[0])
 
         # Leaving the room has to be announced.  A socket that simply
         # disappears counts as "fleeing the village" and the server bans
@@ -787,26 +821,6 @@ class Bot:
         time.sleep(1.0)
         if active_sock[0]:
             active_sock[0].close()
-
-        award = self.state.last_award
-        if award:
-            xp = int(award.get("awardedTotalXp") or 0)
-            levels = int(award.get("awardedLevels") or 0)
-            stats = self.store.get()
-            self.store.update(
-                xp_total=int(stats.get("xp_total") or 0) + xp,
-                xp_last=xp,
-                games_played=int(stats.get("games_played") or 0) + 1,
-            )
-            # The account XP changed on the server, so the level and the
-            # projection have to be read again.
-            self._read_profile()
-            self.log_event("xp", f"+{xp} xp" + (f" (+{levels} levels)" if levels else ""))
-            # The counters survive a restart.
-            self.history.record_game(xp)
-            self.store.update(history=self.history.get())
-            if self.cfg.claim_double_xp and award.get("canClaimDoubleXp") and active_sock[0]:
-                self._claim_double_xp(active_sock[0])
 
         self.store.update(status="reconnecting")
         self.store.update(reconnects=int(self.store.get().get("reconnects") or 0) + 1)
@@ -1131,13 +1145,16 @@ class Bot:
         """
         if self.state.own_id() is not None:
             return
-        if not self._own_player_id:
+        own = getattr(self, "_own_player_id", None)
+        if not own:
             try:
-                self._own_player_id = self.api.get_own_player_id(self.device_id)
+                api = getattr(self, "api", None)
+                if api and hasattr(api, "get_own_player_id"):
+                    own = api.get_own_player_id(getattr(self, "device_id", ""))
+                    self._own_player_id = own
             except Exception as exc:  # noqa: BLE001 - advisory only
                 log.debug("could not read the player profile: %s", exc)
-                self._own_player_id = None
-        own = self._own_player_id
+                own = None
         if own:
             self.state.set_own_id(own)
             return
@@ -1323,7 +1340,12 @@ class Bot:
             return
         self.state.claimed_wolf_id = self.state.own_id()
         self.state.claimed_wolf_seat = seat
-        claim_msg = f"{seat} w"
+        store = getattr(self, "store", None)
+        room_name = (store.get().get("room") or "").lower() if store else ""
+        if any(k in room_name for k in ("say m", "ww say", "m only")):
+            claim_msg = "m"
+        else:
+            claim_msg = f"{seat} w"
 
         def speak() -> None:
             self.chat(sock, claim_msg)
@@ -1338,13 +1360,16 @@ class Bot:
         The flag is cleared whenever a new phase starts, so the bot acts
         once per night and once per day.
         """
+        if not hasattr(self, "_acted_keys"):
+            self._acted_keys = set()
         if key in self._acted_keys:
             return True
         self._acted_keys.add(key)
         return False
 
     def _clear_actions(self) -> None:
-        self._acted_keys.clear()
+        if hasattr(self, "_acted_keys"):
+            self._acted_keys.clear()
 
     def _day_vote(self, sock: SocketIOClient) -> None:
         if self._acted("day-vote"):
