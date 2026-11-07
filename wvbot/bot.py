@@ -448,14 +448,19 @@ class Bot:
                 # every N consecutive games to break robotic 24/7 signatures
                 if played and getattr(self.cfg, "bio_break_enabled", True):
                     self._consecutive_games += 1
-                    if self._consecutive_games >= getattr(self.cfg, "bio_break_interval_games", 12):
+                    target_games = getattr(self.cfg, "bio_break_interval_games", 12)
+                    self.store.update(
+                        consecutive_games=self._consecutive_games,
+                        games_to_bio_break=max(0, target_games - self._consecutive_games),
+                    )
+                    if self._consecutive_games >= target_games:
                         self._consecutive_games = 0
                         break_sec = random.SystemRandom().uniform(
                             getattr(self.cfg, "bio_break_min_sec", 120.0),
                             getattr(self.cfg, "bio_break_max_sec", 240.0),
                         )
                         self.log_event("bio-break", f"taking a human bio-break ({int(break_sec)}s) after consecutive games")
-                        self.store.update(status=f"bio-break ({int(break_sec)}s)")
+                        self.store.update(status=f"bio-break ({int(break_sec)}s)", games_to_bio_break=target_games)
                         self.stop_event.wait(break_sec)
                         self.store.update(status="running")
                 # Always pause between games: joining back to back is
@@ -1352,6 +1357,11 @@ class Bot:
         def speak() -> None:
             self.chat(sock, reply)
             self.log_event("chat", f"reflex said: {reply}")
+            try:
+                stats = self.store.get()
+                self.store.update(reflex_count=int(stats.get("reflex_count") or 0) + 1)
+            except Exception:  # noqa: BLE001
+                pass
 
         self._queue_action("reflex chat", delay * 0.8, delay * 1.2, speak)
 
@@ -1366,6 +1376,11 @@ class Bot:
         def say_gg() -> None:
             self.chat(sock, gg)
             self.log_event("chat", f"reflex said: {gg}")
+            try:
+                stats = self.store.get()
+                self.store.update(reflex_count=int(stats.get("reflex_count") or 0) + 1)
+            except Exception:  # noqa: BLE001
+                pass
 
         self._queue_action("reflex gg", 1.5, 3.5, say_gg)
 
