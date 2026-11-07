@@ -329,19 +329,20 @@ class Bot:
             return False
 
         def is_tf_room(room: dict[str, Any]) -> bool:
-            """Troll Free (TF) rooms are serious 10-minute games, not fast XP farms."""
+            """Time Flies (TF) rooms shorten day/night timers drastically for rapid XP farming."""
             name = GameApi._room_name(room).lower()
-            return any(k in name for k in (" tf", "-tf", "(tf)", "troll free", "trollfree", "e tf"))
+            return any(k in name for k in (" tf", "-tf", "(tf)", "tf ", "time flies", "timeflies", "e tf", "|tf"))
 
-        # Deprioritize slow Troll Free (TF) rooms when farm rooms exist
-        non_tf = [r for r in rooms if not is_tf_room(r)]
-        if non_tf:
-            rooms = non_tf
-
-        # Prioritize instant 'WW Say M' rooms if available
-        say_m = [r for r in rooms if any(k in GameApi._room_name(r).lower() for k in ("say m", "ww say", "m only"))]
-        if say_m:
-            return random.SystemRandom().choice(say_m)
+        # Prioritize instant fast-farm rooms: 'WW Say M' or 'TF' (Time Flies)
+        fast_rooms = [
+            r for r in rooms
+            if any(k in GameApi._room_name(r).lower() for k in ("say m", "ww say", "m only"))
+            or is_tf_room(r)
+        ]
+        if fast_rooms:
+            # Sort by player count descending to join rooms closest to the start threshold (8-16 players)
+            fast_rooms.sort(key=lambda r: int(r.get("playerCount") or 0), reverse=True)
+            return fast_rooms[0]
 
         if getattr(self.cfg, "strict_8p_only", False):
             rooms = [r for r in rooms if is_8p_room(r)]
@@ -890,10 +891,13 @@ class Bot:
             self.store.update(phase=self.state.phase)
             self._clear_actions()
             self._wolf_self_claim(sock)
-            self._day_vote(sock)
+            if event == "game-day-voting-started":
+                self._day_vote(sock)
             self._killer_action(sock)
         elif event == "game-day-vote-set":
             self.state.apply(event, payload)
+            if self.state.phase == "day-voting" and not self.state.is_wolf:
+                self._day_vote(sock, immediate=True)
             self._killer_action(sock)
         elif event in (
             "game-settings-changed",
@@ -907,8 +911,11 @@ class Bot:
         ):
             self.state.apply(event, payload)
             if event == "game:chat-public:msg":
-                if self.state.claimed_wolf_id and getattr(self.cfg, "instant_kill", True):
-                    self._killer_action(sock, instant=True)
+                if self.state.claimed_wolf_id:
+                    if getattr(self.cfg, "instant_kill", True):
+                        self._killer_action(sock, instant=True)
+                    if self.state.phase == "day-voting" and not self.state.is_wolf:
+                        self._day_vote(sock, immediate=True)
                 if getattr(self.cfg, "reflex_chat_enabled", True):
                     self._handle_chat_reflex(sock, parse_payload(payload))
             if event in ("player-joined-and-equipped-items", "players-and-equipped-items"):
@@ -1392,26 +1399,40 @@ class Bot:
         if hasattr(self, "_acted_keys"):
             self._acted_keys.clear()
 
-    def _day_vote(self, sock: SocketIOClient) -> None:
-        if self._acted("day-vote"):
-            return
+    def _day_vote(self, sock: SocketIOClient, immediate: bool = False) -> None:
         if hasattr(self.state, "by_id"):
             own = self.state.by_id(self.state.own_id())
             if own and not getattr(own, "is_alive", True):
                 return
-        target = self.policy.vote_target(self.state)
 
-        def vote() -> None:
-            if target is None:
-                # The official client sends this one without a payload.
+        def do_vote() -> None:
+            # Re-evaluate vote target right before emitting
+            target = self.policy.vote_target(self.state)
+            current_vote = self.state.day_votes.get(self.state.own_id())
+            if target is not None:
+                if current_vote != target:
+                    sock.emit("game-day-vote-set", json.dumps({"targetPlayerId": target}))
+                    self.state.day_votes[self.state.own_id()] = target
+                    self.log_event("action", f"day vote -> {target}")
+            elif not immediate and current_vote is None:
+                # Only vote skip as a fallback if no target and no vote yet
                 sock.emit("game-vote-to-skip")
                 self.log_event("action", "day vote: skip")
-            else:
-                sock.emit("game-day-vote-set", json.dumps({"targetPlayerId": target}))
-                self.log_event("action", f"day vote -> {target}")
 
-        delay = 0.5 if getattr(self.cfg, "turbo_mode", False) else 3.0
-        self._queue_action("day vote", delay, delay + 2.0, vote)
+        if immediate:
+            do_vote()
+            return
+
+        if self._acted("day-vote"):
+            return
+
+        target = self.policy.vote_target(self.state)
+        if target is not None:
+            delay = 0.3 if getattr(self.cfg, "turbo_mode", False) else 1.5
+            self._queue_action("day vote", delay, delay + 0.5, do_vote)
+        else:
+            delay = 4.0 if getattr(self.cfg, "turbo_mode", False) else 10.0
+            self._queue_action("day vote skip fallback", delay, delay + 2.0, do_vote)
 
     def _killer_action(self, sock: SocketIOClient, instant: bool = False) -> None:
         event = KILLER_ROLES.get(self.state.role_id.lower())

@@ -30,9 +30,9 @@ log = logging.getLogger("wvbot.game")
 
 WOLF_TEAMS = {"WEREWOLF", "WOLF", "EVIL", "WEREWOLVES"}
 
-# Fast regex for detecting wolf claims in chat (e.g. "5 w", "w 5", "5 wolf", "im 5 w")
+# Fast regex for detecting wolf claims in chat (e.g. "5 w", "w 5", "5 wolf", "im 5 w", "5 ww", "ww 5", "s5 w", "seat 5 ww")
 WOLF_CLAIM_RE = re.compile(
-    r"(?:^|\b)(?:(?:im|i\s*am)\s+)?(?:(\d{1,2})\s*(?:w|wolf|m)\b|(?:w|wolf|m)\s*(\d{1,2})\b)",
+    r"(?:^|\b)(?:(?:im|i\s*am|me)\s+)?(?:(?:seat|s)?\s*(\d{1,2})\s*(?:w|ww|wolf|werewolf|m|soi|ma)\b|(?:w|ww|wolf|werewolf|m|soi|ma)\s*(?:seat|s)?\s*(\d{1,2})\b)",
     re.IGNORECASE,
 )
 
@@ -175,16 +175,23 @@ class GameState:
         return None
 
     def _check_wolf_claim(self, data: dict[str, Any]) -> None:
-        """Parse chat message for wolf claims (e.g. '5 w', 'w 5', '5 m', 'm', 'im wolf')."""
+        """Parse chat message for wolf claims (e.g. '5 w', 'w 5', '5 ww', '5 m', 'm', 'im wolf')."""
         msg = str(data.get("msg") or "").strip()
         if not msg:
             return
         author_id = data.get("authorId")
+        author = self.by_id(author_id) if author_id is not None else None
+        log.info("chat from %s: %r", author.username if author else author_id, msg)
         clean = msg.lower().strip()
-        # In 'WW Say M' 8-player rooms, werewolves claim simply by saying 'm' or 'm.' or 'w'
-        if clean in ("m", "m.", "w", "ww", "soi", "im wolf", "i am wolf", "im w", "i am w", "im m", "i am m", "me wolf", "wolf here"):
+        clean_stem = clean.strip(" .!?,:;")
+        # In fast-farm rooms, werewolves claim simply by saying 'm' or 'w' or 'ww'
+        if clean_stem in (
+            "m", "w", "ww", "soi", "ma", "wolf", "werewolf",
+            "im wolf", "i am wolf", "im w", "i am w", "im ww", "i am ww",
+            "im m", "i am m", "me wolf", "me ww", "wolf here", "ww here",
+            "im evil", "me evil", "i'm wolf", "i'm w", "i'm ww", "i'm m",
+        ):
             if author_id is not None and author_id != self.own_id():
-                author = self.by_id(author_id)
                 if author and author.is_alive:
                     self.claimed_wolf_id = author.id
                     self.claimed_wolf_seat = (author.grid_idx + 1) if author.grid_idx >= 0 else None
@@ -471,13 +478,20 @@ class Policy:
                 return claimed.id
             if claimed_id == state.own_id():
                 return None
+        # Bandwagon voting: vote for whoever the room is voting for!
+        if state.day_votes:
+            tally: dict[Any, int] = {}
+            for target_id in state.day_votes.values():
+                if not target_id or target_id == state.own_id():
+                    continue
+                p = state.by_id(target_id)
+                if p and getattr(p, "is_alive", True) and target_id not in state.dead_ids:
+                    tally[target_id] = tally.get(target_id, 0) + 1
+            if tally:
+                return max(tally.items(), key=lambda item: item[1])[0]
         counts = self._accusation_counts(state)
         if counts:
             return max(counts.items(), key=lambda item: item[1])[0]
-        # No information: vote for someone the room has already voted for,
-        # otherwise skip the vote entirely.
-        if state.day_votes:
-            return None
         return None
 
     def skip_vote(self) -> bool:

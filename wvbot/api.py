@@ -87,7 +87,7 @@ class GameApi:
         """
         text = str(value or "").replace("İ", "I").replace("ı", "i")
         text = "".join(
-            char for char in unicodedata.normalize("NFD", text)
+            char for char in unicodedata.normalize("NFKD", text)
             if not unicodedata.combining(char)
         )
         return text.lower().strip()
