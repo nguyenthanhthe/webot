@@ -101,6 +101,7 @@ class Config:
     max_room_size: int = 16  # Standard Wolvesville custom lobby size
     stay_in_room: bool = True  # Stay in the room for continuous fast rematches with the same group
     stay_in_room_timeout_sec: float = 60.0  # Max idle seconds in room lobby before looking for a new room
+    stay_in_room_max_game_duration_sec: float = 150.0  # Ditch rooms whose matches drag on > 2.5 minutes
 
     # --- behaviour -----------------------------------------------------
     claim_double_xp: bool = True

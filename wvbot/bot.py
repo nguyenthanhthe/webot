@@ -645,6 +645,7 @@ class Bot:
         last_event = [time.time()]
         last_heartbeat = [time.time()]
         last_game_over_time = [0.0]
+        game_started_at = [0.0]
         active_sock = [None]
 
         def _process_game_award(current_sock: Any) -> None:
@@ -671,6 +672,7 @@ class Bot:
             last_event[0] = time.time()
             if event == "game-started":
                 last_game_over_time[0] = 0.0
+                game_started_at[0] = time.time()
                 self.store.update(status="playing")
             if time.time() - last_heartbeat[0] > 30.0:
                 self._touch_heartbeat()
@@ -725,7 +727,9 @@ class Bot:
             if finished.wait(timeout=1.0):
                 if game_over.is_set():
                     _process_game_award(active_sock[0])
-                    if getattr(self.cfg, "stay_in_room", False):
+                    duration = time.time() - game_started_at[0] if game_started_at[0] > 0 else 0
+                    stay_max = getattr(self.cfg, "stay_in_room_max_game_duration_sec", 150.0)
+                    if getattr(self.cfg, "stay_in_room", False) and (duration <= 0 or duration <= stay_max):
                         game_over.clear()
                         finished.clear()
                         self._clear_actions()
@@ -736,11 +740,19 @@ class Bot:
                             if hasattr(self, "store")
                             else game_id
                         )
-                        self.log_event("lobby", f"cắm phòng '{room_label}': ván xong, giữ nguyên kết nối chờ ván tiếp...")
+                        dur_text = f" trong {int(duration)}s (nhanh)" if duration > 0 else ""
+                        self.log_event("lobby", f"cắm phòng '{room_label}': ván xong{dur_text}, giữ nguyên kết nối chờ ván tiếp...")
                         last_event[0] = time.time()
                         last_game_over_time[0] = time.time()
                         continue
                     else:
+                        room_label = (
+                            (self.store.get().get("room") or game_id)
+                            if hasattr(self, "store")
+                            else game_id
+                        )
+                        if duration > stay_max:
+                            self.log_event("lobby", f"phòng '{room_label}' chậm (ván kéo dài {int(duration)}s > {int(stay_max)}s) - rời phòng tìm phòng TF/fast farm khác")
                         break
 
                 if (
@@ -873,6 +885,7 @@ class Bot:
             self._update_alive()
             self._maybe_chat(sock)
             self._night_action(sock)
+            self._killer_action(sock)
             self._protector_action(sock)
             self._reviver_action(sock)
             self._investigator_action(sock)
@@ -883,6 +896,7 @@ class Bot:
             if event == "game-night-started":
                 self._clear_actions()
             self._night_action(sock)
+            self._killer_action(sock)
             self._protector_action(sock)
             self._reviver_action(sock)
             self._investigator_action(sock)
