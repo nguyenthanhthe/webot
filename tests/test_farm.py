@@ -204,6 +204,129 @@ class FarmTest(unittest.TestCase):
             self.assertEqual(bot.cfg.language, "vi")
             self.assertFalse(bot.start_web_dashboard)
 
+    def test_save_and_remove_account_from_roster(self) -> None:
+        from wvbot.farm import remove_account_from_roster, save_account_to_roster
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            save_account_to_roster(root, "sub2", refresh_token="tok456", overrides={"language": "en"})
+            roster = load_roster(root)
+            self.assertEqual(len(roster), 1)
+            self.assertEqual(roster[0]["name"], "sub2")
+            self.assertEqual(roster[0]["language"], "en")
+            token_file = root / "accounts" / "sub2" / "refresh_token.txt"
+            self.assertTrue(token_file.is_file())
+            self.assertEqual(token_file.read_text(encoding="utf-8").strip(), "tok456")
+
+            # Remove account
+            self.assertTrue(remove_account_from_roster(root, "sub2"))
+            self.assertFalse(remove_account_from_roster(root, "sub2"))
+            self.assertEqual(load_roster(root), [{"name": "main"}])
+
+    def test_farm_dynamic_add_and_remove_account(self) -> None:
+        built: list[FakeBot] = []
+
+        def factory(acc: dict) -> FakeBot:
+            bot = FakeBot(acc)
+            built.append(bot)
+            return bot
+
+        farm = Farm([{"name": "bot1"}], factory, max_bots=3)
+        farm.start()
+        try:
+            time.sleep(0.2)
+            self.assertEqual(len(farm._slots), 1)
+            self.assertEqual(len(built), 1)
+
+            # Hot-add bot2
+            self.assertTrue(farm.add_account({"name": "bot2"}))
+            time.sleep(0.2)
+            self.assertEqual(len(farm._slots), 2)
+            self.assertEqual(len(built), 2)
+            self.assertEqual(built[1].name, "bot2")
+
+            # Duplicate add is rejected
+            self.assertFalse(farm.add_account({"name": "bot2"}))
+
+            # Remove bot2
+            self.assertTrue(farm.remove_account("bot2"))
+            self.assertEqual(len(farm._slots), 1)
+            self.assertTrue(built[1].stop_event.is_set())
+
+            # Remove nonexistent
+            self.assertFalse(farm.remove_account("bot2"))
+        finally:
+            farm.stop()
+
+    def test_accounts_api_and_dashboard(self) -> None:
+        import urllib.request
+        from wvbot.dashboard import get_accounts_summary, start_dashboard
+        from wvbot.farm import save_account_to_roster
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            save_account_to_roster(root, "alpha", "tok_alpha")
+            farm = Farm([{"name": "alpha"}], FakeBot, farm_root=root)
+            server = start_dashboard(host="127.0.0.1", port=0, farm=farm)
+            port = server.server_address[1]
+            try:
+                # 1. get_accounts_summary
+                summary = get_accounts_summary(root, farm)
+                self.assertEqual(len(summary), 1)
+                self.assertEqual(summary[0]["name"], "alpha")
+                self.assertTrue(summary[0]["ready"])
+                self.assertTrue(summary[0]["has_token"])
+                self.assertNotIn("refresh_token", summary[0])
+
+                # 2. GET /api/accounts
+                req = urllib.request.Request(f"http://127.0.0.1:{port}/api/accounts")
+                with urllib.request.urlopen(req) as resp:
+                    self.assertEqual(resp.status, 200)
+                    data = json.loads(resp.read().decode())
+                    self.assertEqual(data["count"], 1)
+                    self.assertEqual(data["accounts"][0]["name"], "alpha")
+
+                # 3. POST /api/accounts (add beta)
+                add_data = json.dumps({"name": "beta", "refresh_token": "tok_beta"}).encode()
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/api/accounts",
+                    data=add_data,
+                    headers={"Content-Type": "application/json"},
+                )
+                with urllib.request.urlopen(req) as resp:
+                    self.assertEqual(resp.status, 200)
+                    res_body = json.loads(resp.read().decode())
+                    self.assertTrue(res_body["ok"])
+                    self.assertEqual(res_body["name"], "beta")
+
+                # Verify beta was added to farm slots
+                self.assertTrue(any(s.name == "beta" for s in farm._slots))
+
+                # 4. DELETE /api/accounts/beta
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/api/accounts/beta",
+                    method="DELETE",
+                )
+                with urllib.request.urlopen(req) as resp:
+                    self.assertEqual(resp.status, 200)
+                    res_body = json.loads(resp.read().decode())
+                    self.assertTrue(res_body["ok"])
+                    self.assertTrue(res_body["removed"])
+
+                # Verify beta removed from farm slots
+                self.assertFalse(any(s.name == "beta" for s in farm._slots))
+
+                # 5. OPTIONS /api/accounts
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/api/accounts",
+                    method="OPTIONS",
+                )
+                with urllib.request.urlopen(req) as resp:
+                    self.assertEqual(resp.status, 204)
+                    self.assertIn("DELETE", resp.headers.get("Access-Control-Allow-Methods", ""))
+            finally:
+                server.shutdown()
+                server.server_close()
+
 
 
 if __name__ == "__main__":

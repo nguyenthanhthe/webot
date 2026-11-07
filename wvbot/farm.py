@@ -93,6 +93,89 @@ def load_roster(farm_root: Path) -> list[dict[str, Any]]:
     return roster
 
 
+def save_account_to_roster(
+    farm_root: Path,
+    name: str,
+    refresh_token: str | None = None,
+    overrides: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    safe_name = clean_name(name)
+    if not safe_name:
+        raise RosterError("invalid account name")
+
+    path = farm_root / ROSTER_FILE
+    data: dict[str, Any] = {"accounts": []}
+    if path.is_file():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            data = {"accounts": []}
+
+    accounts = data.setdefault("accounts", [])
+    account_entry = None
+    for acc in accounts:
+        if acc.get("name") == safe_name:
+            account_entry = acc
+            break
+    else:
+        account_entry = {"name": safe_name}
+        accounts.append(account_entry)
+
+    if overrides:
+        for k, v in overrides.items():
+            if k not in ("name", "refresh_token"):
+                account_entry[k] = v
+
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    try:
+        import os
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+    from .config import REFRESH_TOKEN_FILE
+
+    acc_dir = farm_root / "accounts" / safe_name
+    acc_dir.mkdir(parents=True, exist_ok=True)
+    if refresh_token:
+        token_path = acc_dir / REFRESH_TOKEN_FILE
+        token_path.write_text(refresh_token.strip() + "\n", encoding="utf-8")
+        try:
+            os.chmod(token_path, 0o600)
+        except OSError:
+            pass
+
+    return account_entry
+
+
+def remove_account_from_roster(farm_root: Path, name: str) -> bool:
+    safe_name = clean_name(name)
+    path = farm_root / ROSTER_FILE
+    if not path.is_file():
+        return False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+
+    accounts = data.get("accounts", [])
+    before = len(accounts)
+    accounts = [acc for acc in accounts if acc.get("name") != safe_name]
+    if len(accounts) == before:
+        return False
+
+    if not accounts:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        return True
+
+    data["accounts"] = accounts
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    return True
+
+
 class _Slot:
     """One supervised bot: its thread, its state, its crash count."""
 
@@ -136,7 +219,7 @@ class Farm:
     def control(self, action: str, bot_name: str | None = None) -> bool:
         """Handle a control action (pause/resume/restart) across bots."""
         handled = False
-        for slot in self._slots:
+        for slot in list(self._slots):
             if bot_name is None or slot.name == bot_name:
                 if slot.bot is not None and hasattr(slot.bot, "_control"):
                     if slot.bot._control(action):
@@ -146,12 +229,36 @@ class Farm:
     def reward(self, action: str, bot_name: str | None = None) -> bool:
         """Handle a reward action (daily/wheel/lootbox) across bots."""
         handled = False
-        for slot in self._slots:
+        for slot in list(self._slots):
             if bot_name is None or slot.name == bot_name:
                 if slot.bot is not None and hasattr(slot.bot, "_reward"):
                     if slot.bot._reward(action):
                         handled = True
         return handled
+
+    def add_account(self, account: dict[str, Any]) -> bool:
+        """Add a new account to the running farm."""
+        name = clean_name(str(account.get("name") or ""))
+        if not name or any(s.name == name for s in self._slots):
+            return False
+        if len(self._slots) >= self.max_bots:
+            return False
+        slot = _Slot(account)
+        self._slots.append(slot)
+        if self._supervisor is not None and self._supervisor.is_alive():
+            self._launch(slot)
+        return True
+
+    def remove_account(self, name: str) -> bool:
+        """Stop and remove an account from the running farm."""
+        safe_name = clean_name(name)
+        for i, slot in enumerate(list(self._slots)):
+            if slot.name == safe_name:
+                if slot.bot is not None and hasattr(slot.bot, "stop_event"):
+                    slot.bot.stop_event.set()
+                self._slots.pop(i)
+                return True
+        return False
 
     def start_dashboard(self, host: str = "0.0.0.0", port: int = 8787) -> Any:
         from .dashboard import start_dashboard
@@ -177,7 +284,7 @@ class Farm:
         is no longer running at all.
         """
         bots = []
-        for slot in self._slots:
+        for slot in list(self._slots):
             data: dict[str, Any] = {"name": slot.name, "status": slot.status, "crashes": slot.crashes}
             if slot.bot is not None:
                 try:
@@ -200,13 +307,13 @@ class Farm:
 
     def stop(self) -> None:
         self.stop_event.set()
-        for slot in self._slots:
+        for slot in list(self._slots):
             if slot.bot is not None:
                 slot.bot.stop_event.set()
 
     # ------------------------------------------------------------------
     def start(self) -> None:
-        for slot in self._slots:
+        for slot in list(self._slots):
             self._launch(slot)
         self._supervisor = threading.Thread(
             target=self._supervise, name="farm-supervisor", daemon=True
@@ -247,7 +354,7 @@ class Farm:
         to the farm; only the crash counter tells them apart.
         """
         while not self.stop_event.is_set():
-            for slot in self._slots:
+            for slot in list(self._slots):
                 if slot.status == "failed":
                     continue
                 if slot.thread is not None and slot.thread.is_alive():

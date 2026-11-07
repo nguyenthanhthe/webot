@@ -145,6 +145,11 @@ value:
 10. ~~**Service watchdog multi-mode hardening**~~ - **done (v1.0.1).**
     Updated `job_watchdog.sh`, `service_runner.sh`, and `bot_ctl.sh` process
     matching patterns to cover all execution modes (`farm`, `protocol`, `-m wvbot`).
+11. ~~**Multi-Account Hot-Roster & Dashboard Accounts API**~~ - **done (v1.0.2).**
+    - `GET /api/accounts`: Secure account enumeration with readiness check and token validation, never exposing secrets.
+    - `POST /api/accounts`: Hot-add account to roster and dynamic live bot slot launch in running Farm.
+    - `DELETE /api/accounts/<name>`: Clean removal from roster and graceful thread termination.
+    - Dashboard Web UI: Interactive Farm Roster & Accounts management table, modal form, and real-time live sync.
 
 What could come next, in the order of value:
 
