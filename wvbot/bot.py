@@ -549,10 +549,14 @@ class Bot:
         disconnected = threading.Event()
         game_over = threading.Event()
         last_event = [time.time()]
+        last_heartbeat = [time.time()]
         active_sock = [None]
 
         def handle(event: str, *args: Any) -> None:
             last_event[0] = time.time()
+            if time.time() - last_heartbeat[0] > 30.0:
+                self._touch_heartbeat()
+                last_heartbeat[0] = time.time()
             if active_sock[0]:
                 self._on_game_event(active_sock[0], event, args)
 
@@ -669,6 +673,9 @@ class Bot:
                 break
             if self._session_over.is_set():
                 break
+            if time.time() - last_heartbeat[0] > 30.0:
+                self._touch_heartbeat()
+                last_heartbeat[0] = time.time()
             if time.time() - last_event[0] > self.cfg.silence_timeout_sec:
                 self.log_event("warn", "no server event for a long time - restarting the game")
                 break
