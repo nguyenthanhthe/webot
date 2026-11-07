@@ -66,6 +66,10 @@ class StatusStore:
             "banned_until": None,
             # The level of every player in the room.
             "levels": [],
+            # Anti-bot reflex & fatigue simulator metrics
+            "reflex_count": 0,
+            "consecutive_games": 0,
+            "games_to_bio_break": 12,
             "started_at": time.time(),
             "updated_at": time.time(),
         }
