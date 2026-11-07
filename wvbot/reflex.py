@@ -47,10 +47,12 @@ SKIP_ECHO_REPLIES = [
 class ReflexEngine:
     """Evaluates incoming public chat messages and generates human-like reflexes."""
 
-    def __init__(self, cooldown_sec: float = 12.0):
+    def __init__(self, cooldown_sec: float = 20.0):
         self.cooldown_sec = cooldown_sec
         self.last_reply_time = 0.0
         self.last_reply_text = ""
+        self.last_claimed_role = ""
+        self.last_claim_time = 0.0
 
     def can_reply(self, now: float | None = None) -> bool:
         """True if sufficient time has elapsed since the last automated reply."""
@@ -64,6 +66,8 @@ class ReflexEngine:
             now = time.time()
         self.last_reply_time = now
         self.last_reply_text = text
+        if text.startswith("im ") or text in ("me", "im med", "im seer", "im doc"):
+            self.last_claim_time = now
 
     def calculate_typing_delay(self, text: str) -> float:
         """Calculates natural human typing delay in seconds."""
@@ -121,11 +125,17 @@ class ReflexEngine:
                             mentioned = True
                     break
 
+        if now is None:
+            now = time.time()
+
         if mentioned:
             # If asked directly about role
             role_id = (getattr(state, "role_id", "") or "").lower()
             if any(k in clean for k in ("role", "claim", "what are you", "who r u")):
                 if role_id in ("medium", "seer", "doctor", "bodyguard", "villager"):
+                    if self.last_claimed_role == role_id and (now - self.last_claim_time) < 60.0:
+                        return random.SystemRandom().choice(["already said", "told u", "med" if role_id == "medium" else role_id])
+                    self.last_claimed_role = role_id
                     claim = "im " + ("doc" if role_id == "doctor" else role_id)
                     return claim
             # Generic response to being called out / pinged
