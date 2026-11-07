@@ -9,6 +9,23 @@ and the project uses [semantic versioning](https://semver.org/).
 
 Planned work, see `docs/FEATURE-PLAN.md` for the full list.
 
+## [0.0.6] - 2026-11-07
+
+Token renewal and credential resilience hardening.
+
+### Fixed
+
+- **Token expiry during idle search**: `AuthManager.auth_headers()` now
+  automatically detects when a token expires or is within 300s of expiry
+  and refreshes it via `ensure_token()`, preventing HTTP 401 loops when
+  waiting for rooms over extended periods.
+- **Dynamic auth headers in `GameApi`**: `GameApi.auth_headers` is now a
+  property supporting callable headers so API requests always query fresh
+  tokens dynamically.
+- **HTTP 401 auto-recovery**: `bot.session()` ensures a valid token before
+  scanning rooms, and the main supervisor loop forces credential refresh
+  (`ensure_token(force=True)`) upon encountering an HTTP 401 error.
+
 ## [0.0.5] - 2026-11-05
 
 The 24/7 hardening release: every way the run could die now has a

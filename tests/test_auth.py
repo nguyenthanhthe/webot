@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -71,6 +72,30 @@ class RefreshRotationTest(unittest.TestCase):
         mgr._create_id_token(OLD_TOKEN)
         self.assertEqual(mgr.refresh_token, OLD_TOKEN)
         self.assertFalse((self.state_dir / "refresh_token.txt").exists())
+
+    def test_auth_headers_auto_refreshes_when_expiring(self):
+        cfg = Config(refresh_token=OLD_TOKEN)
+        # First call has expired exp, second call returns fresh token
+        fresh_token = fake_jwt(int(time.time()) + 3600)
+        http = FakeHttp({"idToken": fresh_token})
+        mgr = AuthManager(cfg, http)
+        mgr.id_token = fake_jwt(int(time.time()) - 10)  # expired
+        mgr._token_exp = int(time.time()) - 10
+        headers = mgr.auth_headers()
+        self.assertEqual(headers.get("Authorization"), f"Bearer {fresh_token}")
+
+    def test_auth_headers_does_not_refresh_when_fresh(self):
+        cfg = Config(refresh_token=OLD_TOKEN)
+        fresh_exp = int(time.time()) + 3600
+        current_token = fake_jwt(fresh_exp)
+        http = mock.Mock()
+        mgr = AuthManager(cfg, http)
+        mgr.id_token = current_token
+        mgr._token_exp = fresh_exp
+        headers = mgr.auth_headers()
+        self.assertEqual(headers.get("Authorization"), f"Bearer {current_token}")
+        http.request.assert_not_called()
+
 
 
 if __name__ == "__main__":

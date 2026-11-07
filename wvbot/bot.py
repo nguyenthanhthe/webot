@@ -76,7 +76,7 @@ class Bot:
             token_provider=self._refresh_cf_jwt,
         )
         self.auth = AuthManager(cfg, self.http)
-        self.api = GameApi(cfg, self.http, self.auth.auth_headers())
+        self.api = GameApi(cfg, self.http, self.auth.auth_headers)
         self.state = GameState()
         self.policy = Policy(cfg)
         self.device_id = self._load_device_id()
@@ -258,11 +258,13 @@ class Bot:
             self.store.update(status="running")
 
     def _pick_room(self, rooms: list[dict[str, Any]]) -> dict[str, Any] | None:
-        """Choose a room, preferring the ones that pay the most XP.
+        """Choose a room, preferring the fast-rotating small ones.
 
-        Among the matches the rooms within 80% of the best ``regularXp``
-        are kept, and the choice between them stays random - a human
-        does not always take the same room either.
+        The vill-win rooms pay the same XP whatever their size, but a
+        room of eight players turns its games around much faster than
+        a full sixteen - more finished games per hour is more XP per
+        hour.  Among the matches with the wanted XP flag the smallest
+        rooms are preferred, and the pick stays random between them.
         """
         if not rooms:
             return None
@@ -270,16 +272,34 @@ class Bot:
             return rooms[0]
 
         def xp(room: dict[str, Any]) -> int:
+            value = room.get("regularXp")
+            if isinstance(value, bool):
+                return 1 if value else 0
             try:
-                return int(room.get("regularXp") or 0)
+                return int(value or 0)
             except (TypeError, ValueError):
                 return 0
 
         best = max(xp(room) for room in rooms)
         if best <= 0:
-            return random.SystemRandom().choice(rooms)
-        top = [room for room in rooms if xp(room) >= best * 0.8]
-        return random.SystemRandom().choice(top)
+            top = list(rooms)
+        else:
+            top = [room for room in rooms if xp(room) >= best * 0.8]
+        if not self.cfg.prefer_small_rooms:
+            return random.SystemRandom().choice(top)
+
+        def size(room: dict[str, Any]) -> int:
+            try:
+                return int(room.get("playerCount") or 0)
+            except (TypeError, ValueError):
+                return 99
+
+        # Rooms still filling up are not fast, they are empty; the
+        # fast pool only holds rooms that are actually playing.
+        viable = [room for room in top if size(room) >= 5] or top
+        smallest = min(size(room) for room in viable)
+        small = [room for room in viable if size(room) <= smallest + 3]
+        return random.SystemRandom().choice(small)
 
     # ------------------------------------------------------------------
     # ------------------------------------------------------------------
@@ -402,6 +422,12 @@ class Bot:
                 self._failures += 1
                 self.store.update(errors=self._failures, last_error=str(exc))
                 self.log_event("error", f"session failed: {exc}")
+                if "401" in str(exc):
+                    try:
+                        self.log_event("auth", "HTTP 401 received - forcing credential refresh")
+                        self.auth.ensure_token(force=True)
+                    except Exception as auth_exc:  # noqa: BLE001
+                        log.warning("forced token refresh failed: %s", auth_exc)
                 self.stop_event.wait(self._backoff)
                 self._backoff = min(self._backoff * 2, self.cfg.reconnect_delay_max_sec)
 
@@ -413,6 +439,10 @@ class Bot:
         self.state.reset()
         self._clear_actions()
         self.store.update(status="looking for room", phase="lobby", room=None)
+        try:
+            self.auth.ensure_token()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not ensure auth token before session: %s", exc)
 
         rooms = self.api.find_rooms(self.cfg.room_names)
         if not rooms:
@@ -820,13 +850,26 @@ class Bot:
     def _projection(self) -> dict[str, Any]:
         """How fast the account levels up.
 
-        The XP rate comes from the session so far, the time to the next
-        level from the XP the server says is missing.
+        The rate prefers the persistent day history: it survives the
+        restarts and reflects the whole day, not just this process.  A
+        day with no games yet falls back to the session counter.  The
+        time to the next level comes from the XP the server says is
+        missing.
         """
         stats = self.store.get()
-        uptime = max(1.0, float(stats.get("uptime_sec") or 1))
-        farmed = int(stats.get("xp_total") or 0)
-        rate = farmed / (uptime / 3600.0)
+        history = stats.get("history") or {}
+        today_xp = int(history.get("today_xp") or 0)
+        if today_xp > 0:
+            # The day counters roll over at UTC midnight; the epoch is
+            # aligned with it, so the elapsed part of the day is a
+            # simple modulo.
+            now = time.time()
+            hours = max(0.25, (now % 86400.0) / 3600.0)
+            rate = today_xp / hours
+        else:
+            uptime = max(1.0, float(stats.get("uptime_sec") or 1))
+            farmed = int(stats.get("xp_total") or 0)
+            rate = farmed / (uptime / 3600.0)
 
         level = stats.get("level")
         remaining = stats.get("xp_until_next")

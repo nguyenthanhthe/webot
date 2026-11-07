@@ -69,6 +69,12 @@ class AuthManager:
         return self.cf_jwt
 
     def auth_headers(self) -> dict[str, str]:
+        # If we hold a token that is expired or expiring within 300s, refresh it
+        if self.id_token and self._token_exp and (self._token_exp - int(time.time()) < 300):
+            try:
+                self.ensure_token()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("automatic token refresh in auth_headers failed: %s", exc)
         headers: dict[str, str] = {}
         if self.id_token:
             headers["Authorization"] = f"Bearer {self.id_token}"
