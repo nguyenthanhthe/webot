@@ -208,10 +208,11 @@ class GameState:
 
     @property
     def is_wolf(self) -> bool:
-        return self.role_team.upper() in WOLF_TEAMS or self.role_id.lower() in (
-            "werewolf",
-            "alpha-werewolf",
-            "big-wolf",
+        role = self.role_id.lower()
+        return (
+            self.role_team.upper() in WOLF_TEAMS
+            or "wolf" in role
+            or "werewolf" in role
         )
 
     def reset(self) -> None:
@@ -484,6 +485,8 @@ class Policy:
             for p in state.alive
             if p.id != state.own_id()
             and p.role.lower() not in WOLF_TEAMS
+            and "wolf" not in p.role.lower()
+            and "werewolf" not in p.role.lower()
             and p.team.upper() not in WOLF_TEAMS
         ]
         if not candidates:
@@ -522,6 +525,8 @@ class Policy:
             if (not p.is_alive or p.id in state.dead_ids)
             and p.id != state.own_id()
             and p.role.lower() not in WOLF_TEAMS
+            and "wolf" not in p.role.lower()
+            and "werewolf" not in p.role.lower()
             and p.team.upper() not in WOLF_TEAMS
         ]
         if not dead:
@@ -563,7 +568,12 @@ class Policy:
             p
             for p in state.alive
             if p.id != state.own_id()
-            and (p.team.upper() in WOLF_TEAMS or p.role.lower() in WOLF_TEAMS)
+            and (
+                p.team.upper() in WOLF_TEAMS
+                or p.role.lower() in WOLF_TEAMS
+                or "wolf" in p.role.lower()
+                or "werewolf" in p.role.lower()
+            )
         ]
         if wolves:
             return self.rng.choice(wolves).id
