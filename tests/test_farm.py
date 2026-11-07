@@ -169,6 +169,42 @@ class FarmTest(unittest.TestCase):
         time.sleep(0.3)
         self.assertTrue(all(b.stop_event.is_set() for b in built))
 
+    def test_farm_controls_propagate_to_bots(self) -> None:
+        bots = {}
+
+        class ControllableBot(FakeBot):
+            def __init__(self, acc):
+                super().__init__(acc)
+                self.paused = False
+
+            def _control(self, action: str) -> bool:
+                if action == "pause":
+                    self.paused = True
+                    return True
+                return False
+
+        farm = Farm([{"name": "a"}, {"name": "b"}], lambda acc: bots.setdefault(acc["name"], ControllableBot(acc)))
+        farm.start()
+        try:
+            time.sleep(0.2)
+            self.assertTrue(farm.control("pause", bot_name="a"))
+            self.assertTrue(bots["a"].paused)
+            self.assertFalse(bots["b"].paused)
+        finally:
+            farm.stop()
+
+    def test_default_bot_factory(self) -> None:
+        from wvbot.farm import default_bot_factory
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "accounts" / "sub1").mkdir(parents=True, exist_ok=True)
+            (root / "accounts" / "sub1" / "config.json").write_text(json.dumps({"language": "vi"}), encoding="utf-8")
+            bot = default_bot_factory({"name": "sub1"}, farm_root=root)
+            self.assertEqual(bot.account_dir, root / "accounts" / "sub1")
+            self.assertEqual(bot.cfg.language, "vi")
+            self.assertFalse(bot.start_web_dashboard)
+
+
 
 if __name__ == "__main__":
     unittest.main()

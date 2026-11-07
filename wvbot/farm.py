@@ -22,12 +22,32 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from . import __version__
+from .stream import StreamHub
+
 log = logging.getLogger("wvbot.farm")
 
 ROSTER_FILE = "accounts.json"
 DEFAULT_MAX_BOTS = 4
 # A bot that died this often in a row is parked instead of restarted.
 MAX_CONSECUTIVE_CRASHES = 3
+
+
+def default_bot_factory(account: dict[str, Any], farm_root: Path | None = None) -> Any:
+    """Build a production Bot instance for a roster entry."""
+    from .bot import Bot
+    from .config import STATE_DIR, load_config
+
+    name = str(account.get("name") or "main")
+    root = farm_root if farm_root is not None else STATE_DIR
+    acc_dir = root / "accounts" / name if name != "main" or (root / "accounts" / name).is_dir() else root
+    acc_dir.mkdir(parents=True, exist_ok=True)
+    cfg = load_config(base=acc_dir)
+    # Apply account-specific overrides
+    for k, v in account.items():
+        if hasattr(cfg, k):
+            setattr(cfg, k, v)
+    return Bot(cfg, account_dir=acc_dir, start_web_dashboard=False)
 
 
 def clean_name(value: str) -> str:
@@ -99,14 +119,54 @@ class Farm:
         roster: list[dict[str, Any]],
         bot_factory: Callable[[dict[str, Any]], Any],
         max_bots: int = DEFAULT_MAX_BOTS,
+        farm_root: Path | None = None,
     ):
         self.bot_factory = bot_factory
         self.max_bots = max(1, int(max_bots))
+        self.farm_root = farm_root
+        self.hub = StreamHub()
         self.stop_event = threading.Event()
         self._slots: list[_Slot] = []
         for account in roster[: self.max_bots]:
             self._slots.append(_Slot(account))
         self._supervisor: threading.Thread | None = None
+        self._last_publish = 0.0
+
+    # ------------------------------------------------------------------
+    def control(self, action: str, bot_name: str | None = None) -> bool:
+        """Handle a control action (pause/resume/restart) across bots."""
+        handled = False
+        for slot in self._slots:
+            if bot_name is None or slot.name == bot_name:
+                if slot.bot is not None and hasattr(slot.bot, "_control"):
+                    if slot.bot._control(action):
+                        handled = True
+        return handled
+
+    def reward(self, action: str, bot_name: str | None = None) -> bool:
+        """Handle a reward action (daily/wheel/lootbox) across bots."""
+        handled = False
+        for slot in self._slots:
+            if bot_name is None or slot.name == bot_name:
+                if slot.bot is not None and hasattr(slot.bot, "_reward"):
+                    if slot.bot._reward(action):
+                        handled = True
+        return handled
+
+    def start_dashboard(self, host: str = "0.0.0.0", port: int = 8787) -> Any:
+        from .dashboard import start_dashboard
+
+        # Use first bot's store as fallback if needed
+        first_store = self._slots[0].bot.store if self._slots and self._slots[0].bot else None
+        return start_dashboard(
+            first_store,
+            host=host,
+            port=port,
+            control=self.control,
+            reward=self.reward,
+            farm=self,
+            hub=self.hub,
+        )
 
     # ------------------------------------------------------------------
     def snapshot(self) -> dict[str, Any]:
@@ -128,7 +188,10 @@ class Farm:
                 data["status"] = slot.status
             bots.append(data)
         return {
+            "version": __version__,
+            "status": "farm running",
             "bots": bots,
+            "count": len(bots),
             "playing": sum(1 for b in bots if b.get("status") == "playing"),
             "total_xp": sum(int(b.get("xp_total") or 0) for b in bots),
             "games": sum(int(b.get("games_played") or 0) for b in bots),
@@ -197,4 +260,13 @@ class Farm:
                     continue
                 log.warning("bot %s is gone - restarting it (crashes: %d)", slot.name, slot.crashes)
                 self._launch(slot)
+
+            now = time.time()
+            if now - self._last_publish >= 3.0:
+                self._last_publish = now
+                try:
+                    self.hub.publish("farm", self.snapshot())
+                except Exception:
+                    pass
+
             self.stop_event.wait(0.5)
