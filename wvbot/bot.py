@@ -331,7 +331,12 @@ class Bot:
         def is_tf_room(room: dict[str, Any]) -> bool:
             """Time Flies (TF) rooms shorten day/night timers drastically for rapid XP farming."""
             name = GameApi._room_name(room).lower()
-            return any(k in name for k in (" tf", "-tf", "(tf)", "tf ", "time flies", "timeflies", "e tf", "|tf"))
+            if any(k in name for k in (" tf", "-tf", "(tf)", "tf ", "time flies", "timeflies", "e tf", "|tf")):
+                return True
+            day_ms = room.get("dayDiscussionDurationInMs")
+            if isinstance(day_ms, (int, float)) and 0 < day_ms <= 30000:
+                return True
+            return False
 
         # Prioritize instant fast-farm rooms: 'WW Say M' or 'TF' (Time Flies)
         fast_rooms = [
@@ -642,6 +647,7 @@ class Bot:
         finished = threading.Event()
         disconnected = threading.Event()
         game_over = threading.Event()
+        session_connected_at = time.time()
         last_event = [time.time()]
         last_heartbeat = [time.time()]
         last_game_over_time = [0.0]
@@ -727,9 +733,10 @@ class Bot:
             if finished.wait(timeout=1.0):
                 if game_over.is_set():
                     _process_game_award(active_sock[0])
-                    duration = time.time() - game_started_at[0] if game_started_at[0] > 0 else 0
+                    start_time = game_started_at[0] if game_started_at[0] > 0 else session_connected_at
+                    duration = max(0.0, time.time() - start_time)
                     stay_max = getattr(self.cfg, "stay_in_room_max_game_duration_sec", 150.0)
-                    if getattr(self.cfg, "stay_in_room", False) and (duration <= 0 or duration <= stay_max):
+                    if getattr(self.cfg, "stay_in_room", False) and duration <= stay_max:
                         game_over.clear()
                         finished.clear()
                         self._clear_actions()
@@ -744,6 +751,7 @@ class Bot:
                         self.log_event("lobby", f"cắm phòng '{room_label}': ván xong{dur_text}, giữ nguyên kết nối chờ ván tiếp...")
                         last_event[0] = time.time()
                         last_game_over_time[0] = time.time()
+                        game_started_at[0] = 0.0
                         continue
                     else:
                         room_label = (

@@ -300,6 +300,56 @@ class GameStateEventTest(unittest.TestCase):
         state.day_votes = {"p1": "p2", "p4": "p3", "p5": "p3"}
         self.assertEqual(policy.vote_target(state), "p3")
 
+    def test_wolf_claim_seer_red_and_is_ww(self) -> None:
+        state = make_state()
+        state.apply(
+            "game-started",
+            {
+                "role": {"id": "villager"},
+                "players": [
+                    {"id": "bot", "gridIdx": 0, "username": "bot"},
+                    {"id": "p2", "gridIdx": 1, "username": "player2"},
+                    {"id": "p4", "gridIdx": 3, "username": "player4"},
+                ],
+            },
+        )
+        state.set_own_id("bot")
+
+        # "So 4 is ww"
+        state.apply("game:chat-public:msg", {"authorId": "p2", "msg": "So 4 is ww"})
+        self.assertEqual(state.claimed_wolf_id, "p4")
+
+        # "4 red"
+        state.apply("game:chat-public:msg", {"authorId": "p2", "msg": "4 red"})
+        self.assertEqual(state.claimed_wolf_id, "p4")
+
+        # "red 2"
+        state.apply("game:chat-public:msg", {"authorId": "p4", "msg": "red 2"})
+        self.assertEqual(state.claimed_wolf_id, "p2")
+
+    def test_accusation_counts_seat_numbers(self) -> None:
+        from wvbot.game import Policy
+        state = make_state()
+        state.apply(
+            "game-started",
+            {
+                "role": {"id": "villager"},
+                "players": [
+                    {"id": "bot", "gridIdx": 0, "username": "bot"},
+                    {"id": "p2", "gridIdx": 1, "username": "player2"},
+                    {"id": "p3", "gridIdx": 2, "username": "player3"},
+                ],
+            },
+        )
+        state.set_own_id("bot")
+        policy = Policy()
+
+        # Chat message mentioning seat: "Vote 2" and "go 2"
+        state.messages.append({"authorId": "p3", "msg": "Vote 2"})
+        state.messages.append({"authorId": "p3", "msg": "2 sus"})
+        counts = policy._accusation_counts(state)
+        self.assertEqual(counts.get("p2"), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

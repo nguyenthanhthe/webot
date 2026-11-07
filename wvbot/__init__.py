@@ -1,3 +1,3 @@
-"""Wolvesville custom-game farming bot enterprise (v1.0.6 - Rapid TF Farm & Bandwagon Day Voting Edition)."""
+"""Wolvesville custom-game farming bot enterprise (v1.0.7 - Smart Room Timer & Accusation Seat Detection)."""
 
-__version__ = "1.0.6"
+__version__ = "1.0.7"
