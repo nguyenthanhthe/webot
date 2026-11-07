@@ -959,5 +959,131 @@ class RoleActionHandlersTest(unittest.TestCase):
         self.assertEqual(len(queued), 0)
 
 
+class TurboVillWinFarmTest(unittest.TestCase):
+    def test_turbo_mode_delay_is_minimal(self) -> None:
+        cfg = types.SimpleNamespace(
+            turbo_mode=True,
+            turbo_delay_min_sec=1.0,
+            turbo_delay_max_sec=2.5,
+            delay_min_sec=45.0,
+            delay_max_sec=150.0,
+            joins_per_hour=12,
+        )
+        bot = shell(cfg=cfg, _join_times=[], log_event=mock.MagicMock())
+        for _ in range(20):
+            d = bot._next_delay()
+            self.assertGreaterEqual(d, 1.0)
+            self.assertLessEqual(d, 2.5)
+
+    def test_turbo_mode_skip_room_is_disabled(self) -> None:
+        cfg = types.SimpleNamespace(
+            turbo_mode=True,
+            room_skip_chance=0.8,
+        )
+        bot = shell(cfg=cfg)
+        for _ in range(10):
+            self.assertFalse(bot._skip_room())
+
+    def test_turbo_mode_unlimited_join_budget(self) -> None:
+        cfg = types.SimpleNamespace(
+            turbo_mode=True,
+            joins_per_hour=1,
+        )
+        bot = shell(cfg=cfg, _join_times=[time.time()] * 100)
+        self.assertTrue(bot._join_budget_left())
+
+    def test_pick_room_strictly_prioritizes_8p_rooms(self) -> None:
+        cfg = types.SimpleNamespace(
+            prefer_small_rooms=True,
+            prefer_8p_rooms=True,
+        )
+        bot = shell(cfg=cfg)
+        rooms = [
+            {"gameId": "room-16p", "name": "Vill Win 16P (E)", "regularXp": True, "playerCount": 14, "maxPlayerCount": 16},
+            {"gameId": "room-8p", "name": "8P VILL WIN FAST", "regularXp": True, "playerCount": 6, "maxPlayerCount": 8},
+        ]
+        picked = bot._pick_room(rooms)
+        self.assertIsNotNone(picked)
+        self.assertEqual(picked["gameId"], "room-8p")
+
+    def test_wolf_self_claim_emits_seat_number(self) -> None:
+        state = types.SimpleNamespace(
+            is_wolf=True,
+            own_seat=lambda: 5,
+            own_id=lambda: "bot-wolf-id",
+            claimed_wolf_id=None,
+            claimed_wolf_seat=None,
+        )
+        cfg = types.SimpleNamespace(
+            vill_win_mode=True,
+            wolf_self_claim=True,
+            turbo_mode=True,
+        )
+        queued = []
+        chats = []
+        bot = shell(
+            state=state,
+            cfg=cfg,
+            _acted_keys=set(),
+            _queue_action=lambda name, low, high, act: queued.append((name, act)),
+            chat=lambda sock, msg: chats.append(msg),
+            log_event=mock.MagicMock(),
+        )
+        fake_sock = mock.MagicMock()
+        bot._wolf_self_claim(fake_sock)
+        self.assertEqual(len(queued), 1)
+        self.assertEqual(queued[0][0], "wolf claim")
+        queued[0][1]()
+        self.assertIn("5 w", chats)
+        self.assertEqual(state.claimed_wolf_id, "bot-wolf-id")
+        self.assertEqual(state.claimed_wolf_seat, 5)
+
+    def test_killer_action_instant_kill_on_claimed_wolf(self) -> None:
+        from wvbot.game import Policy
+        state = types.SimpleNamespace(
+            role_id="gunner",
+            players=[
+                types.SimpleNamespace(id="bot-gunner", grid_idx=0, is_alive=True, role="gunner", team="VILLAGER"),
+                types.SimpleNamespace(id="wolf-target", grid_idx=4, is_alive=True, role="", team=""),
+            ],
+            alive=[
+                types.SimpleNamespace(id="bot-gunner", grid_idx=0, is_alive=True, role="gunner", team="VILLAGER"),
+                types.SimpleNamespace(id="wolf-target", grid_idx=4, is_alive=True, role="", team=""),
+            ],
+            by_id=lambda pid: types.SimpleNamespace(id="wolf-target", grid_idx=4, is_alive=True, role="", team="") if pid == "wolf-target" else None,
+            own_id=lambda: "bot-gunner",
+            claimed_wolf_id="wolf-target",
+            claimed_wolf_seat=5,
+            day_votes={},
+            messages=[],
+        )
+        cfg = types.SimpleNamespace(
+            room_names=["vill win"],
+            vill_win_mode=True,
+            instant_kill=True,
+        )
+        policy = Policy(cfg)
+        queued = []
+        bot = shell(
+            state=state,
+            cfg=cfg,
+            policy=policy,
+            _acted_keys=set(),
+            _queue_action=lambda name, low, high, act: queued.append((name, low, high, act)),
+            log_event=mock.MagicMock(),
+        )
+        fake_sock = mock.MagicMock()
+        bot._killer_action(fake_sock, instant=True)
+        self.assertEqual(len(queued), 1)
+        name, low, high, act = queued[0]
+        self.assertEqual(name, "game-gunner-shoot-player")
+        self.assertLessEqual(low, 0.3)
+        act()
+        fake_sock.emit.assert_called_once_with(
+            "game-gunner-shoot-player",
+            '{"targetPlayerId": "wolf-target"}',
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

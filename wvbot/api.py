@@ -98,19 +98,11 @@ class GameApi:
         The room names are written by players and change all the time:
         the same room shows up as "E  VİLL WİN", "E - VILLAGE WIN - NT"
         or "24HR VILL WIN NT (E)".  A wanted name is therefore split
-        into words, and a room matches when it carries every word.
-        "vill win" matches "village win" that way, because "vill" is
-        part of "village".
-
-        Rooms with a password are skipped unless the config allows them:
-        the server refuses the join without the password, and the bot
-        has no way to guess it.
+        into words, and a room matches when it carries every word of any
+        wanted pattern.
         """
         wanted = [self.fold(n) for n in names if n and n.strip()]
         if not wanted:
-            return []
-        tokens = [w for name in wanted for w in name.split() if w]
-        if not tokens:
             return []
         found: list[dict[str, Any]] = []
         self.last_matching = 0
@@ -121,7 +113,7 @@ class GameApi:
             name = self.fold(self._room_name(room))
             if not name:
                 continue
-            if not self._matches(name, wanted, tokens):
+            if not self._matches(name, wanted):
                 continue
             self.last_matching += 1
             if room.get("hasPassword") and not self.cfg.allow_password_rooms:
@@ -131,14 +123,15 @@ class GameApi:
         return found
 
     @staticmethod
-    def _matches(name: str, wanted: list[str], tokens: list[str]) -> bool:
-        """True when the room name carries the wanted name."""
-        if name in wanted:
-            return True
-        if any(w in name for w in wanted):
-            return True
-        # Every word of the wanted name has to appear somewhere.
-        return all(token in name for token in tokens)
+    def _matches(name: str, wanted: list[str], tokens: list[str] | None = None) -> bool:
+        """True when the room name carries any of the wanted patterns."""
+        for target in wanted:
+            if target in name:
+                return True
+            target_tokens = target.split()
+            if target_tokens and all(token in name for token in target_tokens):
+                return True
+        return False
 
     # ------------------------------------------------------------------
     def check_password_presence(self, game_id: Any) -> bool:

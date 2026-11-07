@@ -240,6 +240,47 @@ class KillerTargetTest(unittest.TestCase):
         )
         self.assertEqual(policy.killer_target(state, safe_mode=True), 3)
 
+    def test_killer_targets_claimed_wolf_from_chat(self) -> None:
+        policy = Policy()
+        state = state_with(
+            [
+                {"id": 1, "username": "gunner_bot", "gridIdx": 0},
+                {"id": 2, "username": "alice", "gridIdx": 1},
+                {"id": 3, "username": "wolf_guy", "gridIdx": 4},  # seat 5
+            ],
+            own_id=1,
+        )
+        state.apply("game:chat-public:msg", {"authorId": 3, "msg": "5 w"})
+        self.assertEqual(state.claimed_wolf_id, 3)
+        self.assertEqual(state.claimed_wolf_seat, 5)
+        self.assertEqual(policy.killer_target(state, safe_mode=True), 3)
+        self.assertEqual(policy.vote_target(state), 3)
+
+    def test_vill_win_mode_werewolves_do_not_bite_at_night(self) -> None:
+        policy = Policy()
+        state = state_with(
+            [
+                {"id": 1, "username": "wolf_bot", "role": "werewolf"},
+                {"id": 2, "username": "victim", "role": "villager"},
+            ],
+            own_id=1,
+        )
+        self.assertIsNone(policy.kill_target(state, vill_win_mode=True))
+        self.assertEqual(policy.kill_target(state, vill_win_mode=False), 2)
+
+    def test_bot_does_not_vote_self_when_bot_is_claimed_wolf(self) -> None:
+        policy = Policy()
+        state = state_with(
+            [
+                {"id": 1, "username": "wolf_bot", "gridIdx": 2},  # seat 3
+                {"id": 2, "username": "villager", "gridIdx": 0},
+            ],
+            own_id=1,
+        )
+        state.apply("game:chat-public:msg", {"authorId": 1, "msg": "3 w"})
+        self.assertEqual(state.claimed_wolf_id, 1)
+        self.assertIsNone(policy.vote_target(state))
+
 
 if __name__ == "__main__":
     unittest.main()

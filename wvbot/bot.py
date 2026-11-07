@@ -184,10 +184,14 @@ class Bot:
     def _next_delay(self) -> float:
         """How long to wait before the next game.
 
-        A flat delay is a fingerprint in itself, so the wait is drawn
-        from a range.  When the bot has joined a lot of games in the last
-        hour it waits longer on top of that.
+        In turbo mode, the bot cycles rooms with minimal latency (1-2.5s)
+        to maximize games and XP per hour (>= 3,000 XP/h target).
         """
+        if getattr(self.cfg, "turbo_mode", False):
+            low = max(0.2, getattr(self.cfg, "turbo_delay_min_sec", 1.0))
+            high = max(low, getattr(self.cfg, "turbo_delay_max_sec", 2.5))
+            return round(random.SystemRandom().uniform(low, high), 2)
+
         low = max(0.0, self.cfg.delay_min_sec)
         high = max(low, self.cfg.delay_max_sec)
         delay = random.SystemRandom().uniform(low, high)
@@ -212,17 +216,19 @@ class Bot:
     def _skip_room(self) -> bool:
         """True when this matching room is left alone, as a human would.
 
-        The skipped room does not count as a join for the hourly limit.
+        In turbo mode, skipping is disabled (0% skip) for maximum XP throughput.
         """
+        if getattr(self.cfg, "turbo_mode", False):
+            return False
         return random.SystemRandom().random() < self.cfg.room_skip_chance
 
     def _join_budget_left(self) -> bool:
         """False when the hourly join cap is used up this round.
 
-        A longer wait after the fact still put join number thirteen
-        inside the hour; the cap has to be checked *before* joining,
-        or the self-protection is decorative.
+        In turbo mode, custom room joins are unconstrained.
         """
+        if getattr(self.cfg, "turbo_mode", False):
+            return True
         left = self._joins_in_hour() < self.cfg.joins_per_hour
         if not left:
             self.log_event(
@@ -292,13 +298,12 @@ class Bot:
             self.store.update(status="running")
 
     def _pick_room(self, rooms: list[dict[str, Any]]) -> dict[str, Any] | None:
-        """Choose a room, preferring the fast-rotating small ones.
+        """Choose a room, preferring the fast-rotating 8-player ones.
 
-        The vill-win rooms pay the same XP whatever their size, but a
-        room of eight players turns its games around much faster than
-        a full sixteen - more finished games per hour is more XP per
-        hour.  Among the matches with the wanted XP flag the smallest
-        rooms are preferred, and the pick stays random between them.
+        Vill-win rooms pay full XP regardless of size, but an 8-player
+        room turns around in 30-60 seconds compared to 4-5 minutes for
+        a 16-player room. Prioritizing 8-player rooms is essential to
+        reaching >= 3,000 XP/hour.
         """
         if not rooms:
             return None
@@ -319,8 +324,6 @@ class Bot:
             top = list(rooms)
         else:
             top = [room for room in rooms if xp(room) >= best * 0.8]
-        if not self.cfg.prefer_small_rooms:
-            return random.SystemRandom().choice(top)
 
         def size(room: dict[str, Any]) -> int:
             try:
@@ -328,9 +331,36 @@ class Bot:
             except (TypeError, ValueError):
                 return 99
 
-        # Rooms still filling up are not fast, they are empty; the
-        # fast pool only holds rooms that are actually playing.
-        viable = [room for room in top if size(room) >= 5] or top
+        def is_8p_room(room: dict[str, Any]) -> bool:
+            name = GameApi._room_name(room).lower()
+            max_p = 0
+            for key in ("maxPlayerCount", "maxPlayers", "playerLimit"):
+                if key in room:
+                    try:
+                        max_p = int(room[key] or 0)
+                        break
+                    except (TypeError, ValueError):
+                        pass
+            roles = room.get("roles")
+            roles_count = len(roles) if isinstance(roles, list) else 0
+            if 0 < max_p <= 8:
+                return True
+            if 0 < roles_count <= 8:
+                return True
+            if any(k in name for k in ("8p", "8 p", "8-p", " 8 ", "8player", "vw8")):
+                return True
+            return False
+
+        if getattr(self.cfg, "prefer_8p_rooms", True):
+            eight_p = [r for r in top if is_8p_room(r)]
+            if eight_p:
+                top = eight_p
+
+        if not self.cfg.prefer_small_rooms:
+            return random.SystemRandom().choice(top)
+
+        # In 8p rooms, 4-7 players means the room is about to start
+        viable = [room for room in top if size(room) >= 4] or top
         smallest = min(size(room) for room in viable)
         small = [room for room in viable if size(room) <= smallest + 3]
         return random.SystemRandom().choice(small)
@@ -445,8 +475,8 @@ class Bot:
                 self._failures = 0
                 self._backoff = self.cfg.reconnect_delay_sec
                 # Human bio-break / fatigue simulator: take a natural break
-                # every N consecutive games to break robotic 24/7 signatures
-                if played and getattr(self.cfg, "bio_break_enabled", True):
+                # every N consecutive games to break robotic 24/7 signatures (bypassed in turbo_mode)
+                if played and getattr(self.cfg, "bio_break_enabled", True) and not getattr(self.cfg, "turbo_mode", False):
                     self._consecutive_games += 1
                     target_games = getattr(self.cfg, "bio_break_interval_games", 12)
                     self.store.update(
@@ -794,11 +824,13 @@ class Bot:
             self._protector_action(sock)
             self._reviver_action(sock)
             self._investigator_action(sock)
-        elif event == "game-day-voting-started":
+        elif event in ("game-day-voting-started", "game-day-started"):
             self.state.apply(event, payload)
             self.store.update(phase=self.state.phase)
             self._clear_actions()
+            self._wolf_self_claim(sock)
             self._day_vote(sock)
+            self._killer_action(sock)
         elif event == "game-day-vote-set":
             self.state.apply(event, payload)
             self._killer_action(sock)
@@ -814,6 +846,8 @@ class Bot:
         ):
             self.state.apply(event, payload)
             if event == "game:chat-public:msg":
+                if self.state.claimed_wolf_id and getattr(self.cfg, "instant_kill", True):
+                    self._killer_action(sock, instant=True)
                 if getattr(self.cfg, "reflex_chat_enabled", True):
                     self._handle_chat_reflex(sock, parse_payload(payload))
             if event in ("player-joined-and-equipped-items", "players-and-equipped-items"):
@@ -835,6 +869,9 @@ class Bot:
                 pass
             self.state.apply(event, payload)
             self.store.update(phase="game-over")
+            award = self.state.last_award
+            if self.cfg.claim_double_xp and award.get("canClaimDoubleXp"):
+                self._claim_double_xp(sock)
             if getattr(self.cfg, "reflex_chat_enabled", True):
                 self._handle_game_over_reflex(sock)
         elif event == "error-user-banned":
@@ -1230,12 +1267,10 @@ class Bot:
     def _night_action(self, sock: SocketIOClient) -> None:
         if not self.state.is_wolf:
             return
-        # One vote per night.  The server sends the night events again
-        # for every vote in the room, and voting over and over looks
-        # like a bot.
         if self._acted("werewolf-vote"):
             return
-        target = self.policy.kill_target(self.state)
+        is_vill_win = getattr(self.cfg, "vill_win_mode", True)
+        target = self.policy.kill_target(self.state, vill_win_mode=is_vill_win)
         if target is None:
             return
 
@@ -1244,6 +1279,28 @@ class Bot:
             self.log_event("action", f"werewolf vote -> {target}")
 
         self._queue_action("werewolf vote", 3.0, 12.0, vote)
+
+    def _wolf_self_claim(self, sock: SocketIOClient) -> None:
+        """In vill-win rooms, if the bot is wolf, immediately claim seat number in chat."""
+        if not getattr(self.cfg, "vill_win_mode", True) or not getattr(self.cfg, "wolf_self_claim", True):
+            return
+        if not self.state.is_wolf:
+            return
+        if self._acted("wolf-self-claim"):
+            return
+        seat = self.state.own_seat()
+        if seat is None:
+            return
+        self.state.claimed_wolf_id = self.state.own_id()
+        self.state.claimed_wolf_seat = seat
+        claim_msg = f"{seat} w"
+
+        def speak() -> None:
+            self.chat(sock, claim_msg)
+            self.log_event("chat", f"vill-win wolf claim: {claim_msg}")
+
+        delay = 0.3 if getattr(self.cfg, "turbo_mode", False) else 1.0
+        self._queue_action("wolf claim", delay, delay + 0.5, speak)
 
     def _acted(self, key: str) -> bool:
         """True when this action was already taken in the current phase.
@@ -1273,14 +1330,21 @@ class Bot:
                 sock.emit("game-day-vote-set", json.dumps({"targetPlayerId": target}))
                 self.log_event("action", f"day vote -> {target}")
 
-        self._queue_action("day vote", 3.0, 12.0, vote)
+        delay = 0.5 if getattr(self.cfg, "turbo_mode", False) else 3.0
+        self._queue_action("day vote", delay, delay + 2.0, vote)
 
-    def _killer_action(self, sock: SocketIOClient) -> None:
+    def _killer_action(self, sock: SocketIOClient, instant: bool = False) -> None:
         event = KILLER_ROLES.get(self.state.role_id.lower())
         if not event or self._acted(event):
             return
         # One kill per day. In vill-win rooms, protect villagers by using safe mode
-        is_vill_win = "vill" in (self.cfg.room_names or "").lower()
+        room_names = getattr(self.cfg, "room_names", [])
+        is_vill_win = getattr(self.cfg, "vill_win_mode", True)
+        if not is_vill_win and room_names:
+            if isinstance(room_names, str):
+                is_vill_win = "vill" in room_names.lower() or "vw" in room_names.lower()
+            else:
+                is_vill_win = any("vill" in str(n).lower() or "vw" in str(n).lower() for n in room_names)
         target = self.policy.killer_target(self.state, safe_mode=is_vill_win)
         if target is None:
             self._acted_keys.discard(event)
@@ -1290,7 +1354,12 @@ class Bot:
             sock.emit(event, json.dumps({"targetPlayerId": target}))
             self.log_event("action", f"{event} -> {target}")
 
-        self._queue_action(event, 3.0, 12.0, kill)
+        if instant or (getattr(self.cfg, "instant_kill", True) and getattr(self.state, "claimed_wolf_id", None) == target):
+            # Instant reaction (0.2 - 0.5s) to end the game immediately on Day 1!
+            self._queue_action(event, 0.2, 0.5, kill)
+        else:
+            delay = 0.8 if getattr(self.cfg, "turbo_mode", False) else 3.0
+            self._queue_action(event, delay, delay + 2.0, kill)
 
     def _protector_action(self, sock: SocketIOClient) -> None:
         """The doctor and the bodyguard pick somebody to protect."""
