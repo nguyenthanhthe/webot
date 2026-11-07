@@ -73,9 +73,7 @@ class Config:
 
     # --- what to farm --------------------------------------------------
     # Room names to join in the custom-game list. "vill win" is the English
-    # region room the operator reported as continuously populated.  The
-    # matching is word based, so this also covers "village win" and
-    # "24HR VILL WIN NT (E)".
+    # region room the operator reported as continuously populated.
     room_names: list[str] = field(default_factory=lambda: ["vill win"])
     # Rooms with a password are skipped by default: the server refuses
     # the join without it.
@@ -87,6 +85,19 @@ class Config:
     # Asia routing: the English lobby lives on game.api-wolvesville.com,
     # but game-asia.api-wolvesville.com is a valid alternative host.
     use_asia_host: bool = False
+
+    # --- turbo & vill-win xp farm mode ---------------------------------
+    # Turbo mode enables high-speed custom room farming (>= 3,000 XP/h target):
+    # aggressive cycling (1-2.5s delay), no bio-break pauses, 0% room skip,
+    # no hourly join limit throttling, prioritization of 8-player rooms.
+    turbo_mode: bool = True
+    turbo_delay_min_sec: float = 1.0
+    turbo_delay_max_sec: float = 2.5
+    vill_win_mode: bool = True  # Wolf self-claim & no bite at night, killer instant reaction
+    wolf_self_claim: bool = True  # Claim seat number as wolf on Day 1 (e.g. "5 w")
+    instant_kill: bool = True  # Killer roles shoot claimed wolf immediately (<0.5s)
+    prefer_8p_rooms: bool = True  # Strictly prioritize 8-player custom rooms
+    max_room_size: int = 8  # Target max players for rapid cycling
 
     # --- behaviour -----------------------------------------------------
     claim_double_xp: bool = True

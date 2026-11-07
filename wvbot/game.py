@@ -22,12 +22,19 @@ from __future__ import annotations
 import json
 import logging
 import random
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 log = logging.getLogger("wvbot.game")
 
 WOLF_TEAMS = {"WEREWOLF", "WOLF", "EVIL", "WEREWOLVES"}
+
+# Fast regex for detecting wolf claims in chat (e.g. "5 w", "w 5", "5 wolf", "im 5 w")
+WOLF_CLAIM_RE = re.compile(
+    r"(?:^|\b)(?:(?:im|i\s*am)\s+)?(?:(\d{1,2})\s*(?:w|wolf)\b|(?:w|wolf)\s*(\d{1,2})\b)",
+    re.IGNORECASE,
+)
 
 # The XP each level needs, from the official client bundle.  The table
 # is a list of per-level requirements; the cumulative thresholds are
@@ -138,6 +145,8 @@ class GameState:
     night_votes: dict[Any, Any] = field(default_factory=dict)
     messages: list[dict[str, Any]] = field(default_factory=list)
     last_award: dict[str, Any] = field(default_factory=dict)
+    claimed_wolf_id: Any = None
+    claimed_wolf_seat: int | None = None
 
     # -- helpers -------------------------------------------------------
     def by_id(self, pid: Any) -> Player | None:
@@ -145,6 +154,53 @@ class GameState:
             if player.id == pid:
                 return player
         return None
+
+    def player_by_seat(self, seat: int) -> Player | None:
+        """Find player by 1-based seat number (grid_idx + 1)."""
+        for player in self.players:
+            if player.grid_idx >= 0 and (player.grid_idx + 1) == seat:
+                return player
+        if 1 <= seat <= len(self.players):
+            return self.players[seat - 1]
+        return None
+
+    def own_seat(self) -> int | None:
+        """Return bot's 1-based seat number."""
+        own = self.by_id(self.own_id())
+        if own is not None and own.grid_idx >= 0:
+            return own.grid_idx + 1
+        for idx, p in enumerate(self.players):
+            if p.id == self.own_id():
+                return idx + 1
+        return None
+
+    def _check_wolf_claim(self, data: dict[str, Any]) -> None:
+        """Parse chat message for wolf claims (e.g. '5 w', 'w 5', 'im wolf')."""
+        msg = str(data.get("msg") or "").strip()
+        if not msg:
+            return
+        m = WOLF_CLAIM_RE.search(msg)
+        if m:
+            seat_str = m.group(1) or m.group(2)
+            try:
+                seat = int(seat_str)
+                claimed_player = self.player_by_seat(seat)
+                if claimed_player and claimed_player.is_alive:
+                    self.claimed_wolf_id = claimed_player.id
+                    self.claimed_wolf_seat = seat
+                    log.info("wolf claim registered: seat %d -> player %s (%s)", seat, claimed_player.username, claimed_player.id)
+                    return
+            except (ValueError, TypeError):
+                pass
+        clean = msg.lower().strip()
+        if clean in ("im wolf", "i am wolf", "im w", "i am w", "me wolf", "wolf here"):
+            author_id = data.get("authorId")
+            if author_id is not None:
+                author = self.by_id(author_id)
+                if author and author.is_alive:
+                    self.claimed_wolf_id = author.id
+                    self.claimed_wolf_seat = (author.grid_idx + 1) if author.grid_idx >= 0 else None
+                    log.info("author wolf claim registered: player %s (%s)", author.username, author.id)
 
     @property
     def alive(self) -> list[Player]:
@@ -172,6 +228,8 @@ class GameState:
         self.night_votes = {}
         self.messages = []
         self.last_award = {}
+        self.claimed_wolf_id = None
+        self.claimed_wolf_seat = None
         # A new game is a new player list; the old own id must not leak
         # into it.
         self._own_id = None
@@ -210,6 +268,7 @@ class GameState:
             if isinstance(data, dict):
                 self.messages.append(data)
                 del self.messages[:-200]
+                self._check_wolf_claim(data)
         elif event == "game-reconnect-set-players":
             self._on_reconnect(data)
         elif event in (
@@ -394,6 +453,14 @@ class Policy:
         alive = state.alive
         if not alive:
             return None
+        # Claimed wolf from chat has absolute highest priority for voting!
+        claimed_id = getattr(state, "claimed_wolf_id", None)
+        if claimed_id is not None:
+            claimed = state.by_id(claimed_id)
+            if claimed and claimed.is_alive and claimed.id != state.own_id():
+                return claimed.id
+            if claimed_id == state.own_id():
+                return None
         counts = self._accusation_counts(state)
         if counts:
             return max(counts.items(), key=lambda item: item[1])[0]
@@ -408,7 +475,10 @@ class Policy:
         return True
 
     # -- night ---------------------------------------------------------
-    def kill_target(self, state: GameState) -> Any | None:
+    def kill_target(self, state: GameState, vill_win_mode: bool = False) -> Any | None:
+        if vill_win_mode:
+            # In vill-win rooms, werewolves NEVER bite at night
+            return None
         candidates = [
             p
             for p in state.alive
@@ -476,9 +546,19 @@ class Policy:
     def killer_target(self, state: GameState, safe_mode: bool = True) -> Any | None:
         """Choose a target for killer roles (priest, vigilante, gunner).
 
-        In safe mode (default for vill-win rooms), avoids shooting blindly:
-        only shoots if a living player is confirmed wolf or accused by multiple players.
+        In vill-win rooms:
+        1. If a living player claimed wolf in chat, shoot them IMMEDIATELY!
+        2. If a living player is confirmed wolf by role/team, shoot them.
+        3. If safe_mode is False, fall back to accusations or day votes.
         """
+        # 1. Claimed wolf from chat has absolute highest priority!
+        claimed_id = getattr(state, "claimed_wolf_id", None)
+        if claimed_id is not None:
+            claimed = state.by_id(claimed_id)
+            if claimed and claimed.is_alive and claimed.id != state.own_id():
+                return claimed.id
+
+        # 2. Known wolves
         wolves = [
             p
             for p in state.alive
