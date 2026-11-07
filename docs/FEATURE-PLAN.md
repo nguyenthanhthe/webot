@@ -150,6 +150,11 @@ value:
     - `POST /api/accounts`: Hot-add account to roster and dynamic live bot slot launch in running Farm.
     - `DELETE /api/accounts/<name>`: Clean removal from roster and graceful thread termination.
     - Dashboard Web UI: Interactive Farm Roster & Accounts management table, modal form, and real-time live sync.
+12. ~~**End-to-End Account Provisioning Pipeline (Cloudflare Temp Email)**~~ - **done (v1.0.2).**
+    - Architecture blueprint: `docs/ACCOUNT-CREATION-PIPELINE.md`.
+    - Pure stdlib client: `tools/temp_email.py` (`TempEmailClient`).
+    - Automated mailbox creation (`/admin/new_address`) and inbox listener for verification codes (`/api/parsed_mails`).
+    - Verified with unit tests (`tests/test_temp_email.py`).
 
 What could come next, in the order of value:
 
