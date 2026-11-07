@@ -430,4 +430,73 @@ class Policy:
         alive = [p for p in state.alive if p.id != state.own_id()]
         if not alive:
             return None
-        return self.rng.choice(alive).id
+        # Prioritize key roles (seer, aura-seer, detective) if known
+        seers = [
+            p
+            for p in alive
+            if p.role.lower() in ("seer", "aura-seer", "detective")
+            and p.team.upper() not in WOLF_TEAMS
+        ]
+        if seers:
+            return self.rng.choice(seers).id
+        # Otherwise protect highest level living player
+        alive.sort(key=lambda p: getattr(p, "level", 0), reverse=True)
+        top = alive[:3]
+        return self.rng.choice(top).id
+
+    def revive_target(self, state: GameState) -> Any | None:
+        """Find a dead villager to revive for the Medium role."""
+        dead = [
+            p
+            for p in state.players
+            if (not p.is_alive or p.id in state.dead_ids)
+            and p.id != state.own_id()
+            and p.role.lower() not in WOLF_TEAMS
+            and p.team.upper() not in WOLF_TEAMS
+        ]
+        if not dead:
+            return None
+        # Prefer higher level dead player
+        dead.sort(key=lambda p: getattr(p, "level", 0), reverse=True)
+        return dead[0].id
+
+    def reveal_target(self, state: GameState) -> Any | None:
+        """Find an unrevealed living player to investigate for Seer / Aura Seer."""
+        candidates = [
+            p for p in state.alive
+            if p.id != state.own_id()
+            and not p.role
+        ]
+        if not candidates:
+            candidates = [p for p in state.alive if p.id != state.own_id()]
+        if not candidates:
+            return None
+        return self.rng.choice(candidates).id
+
+    def killer_target(self, state: GameState, safe_mode: bool = True) -> Any | None:
+        """Choose a target for killer roles (priest, vigilante, gunner).
+
+        In safe mode (default for vill-win rooms), avoids shooting blindly:
+        only shoots if a living player is confirmed wolf or accused by multiple players.
+        """
+        wolves = [
+            p
+            for p in state.alive
+            if p.id != state.own_id()
+            and (p.team.upper() in WOLF_TEAMS or p.role.lower() in WOLF_TEAMS)
+        ]
+        if wolves:
+            return self.rng.choice(wolves).id
+
+        counts = self._accusation_counts(state)
+        accused = [pid for pid, c in counts.items() if c >= 2]
+        if accused:
+            return accused[0]
+
+        if safe_mode:
+            return None
+
+        for value in state.day_votes.values():
+            if value and value != state.own_id():
+                return value
+        return None

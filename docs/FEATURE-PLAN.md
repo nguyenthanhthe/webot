@@ -155,6 +155,12 @@ value:
     - Pure stdlib client: `tools/temp_email.py` (`TempEmailClient`).
     - Automated mailbox creation (`/admin/new_address`) and inbox listener for verification codes (`/api/parsed_mails`).
     - Verified with unit tests (`tests/test_temp_email.py`).
+13. ~~**Deterministic Instant Reflex Engine & Deep Role Expansion**~~ - **done (v1.0.3).**
+    - Pure Python stdlib regex reflex engine (`wvbot/reflex.py`, 0.1ms latency, zero AI/LLM overhead).
+    - Bot-check evasion: responds to username mentions, seat number inquiries, and general AFK queries with realistic slang and human typing jitter.
+    - Deterministic Role Engine: Medium (`game-medium-revive-player`), Seer (`game-seer-reveal-player`), Doctor/Bodyguard priority protection for key assets.
+    - Safe Killer Discipline: Suppresses blind firing by Gunner/Priest/Vigilante in vill-win lobbies to avoid griefing and account blacklisting.
+    - Human Bio-Break Fatigue Simulator: Breaks robotic 24/7 telemetry with natural pauses every 10-12 consecutive matches.
 
 What could come next, in the order of value:
 

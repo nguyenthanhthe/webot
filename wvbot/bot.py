@@ -38,6 +38,7 @@ from .dashboard import StatusStore, start_dashboard
 from .game import GameState, Policy, parse_payload, xp_to_next_level
 from .history import XpHistory
 from .http_client import HttpClient
+from .reflex import ReflexEngine
 from .rewards import Rewards
 from .sio import SocketIOClient
 from .stream import StreamHub
@@ -64,6 +65,18 @@ KILLER_ROLES = {
 PROTECTOR_ROLES = {
     "doctor": "game-doctor-protect-player",
     "bodyguard": "game-bodyguard-protect-player",
+}
+
+# The roles that revive a dead player.
+REVIVER_ROLES = {
+    "medium": "game-medium-revive-player",
+}
+
+# The roles that reveal or investigate somebody.
+INVESTIGATOR_ROLES = {
+    "seer": "game-seer-reveal-player",
+    "aura-seer": "game-aura-seer-reveal-player",
+    "detective": "game-detective-examine-player",
 }
 
 
@@ -118,6 +131,9 @@ class Bot:
         # lives in the state dir: os.execv wipes the memory, and a
         # marker only in RAM would restart the bot in a tight loop.
         self._last_restart_day = self._load_restart_day()
+        # Deterministic instant reflex engine & anti-bot check evasion
+        self.reflex = ReflexEngine(cooldown_sec=getattr(cfg, "reflex_chat_cooldown_sec", 12.0))
+        self._consecutive_games = 0
 
     def _state(self, name: str) -> Path:
         base = getattr(self, "account_dir", None)
@@ -428,6 +444,20 @@ class Bot:
                 played = self.session()
                 self._failures = 0
                 self._backoff = self.cfg.reconnect_delay_sec
+                # Human bio-break / fatigue simulator: take a natural break
+                # every N consecutive games to break robotic 24/7 signatures
+                if played and getattr(self.cfg, "bio_break_enabled", True):
+                    self._consecutive_games += 1
+                    if self._consecutive_games >= getattr(self.cfg, "bio_break_interval_games", 12):
+                        self._consecutive_games = 0
+                        break_sec = random.SystemRandom().uniform(
+                            getattr(self.cfg, "bio_break_min_sec", 120.0),
+                            getattr(self.cfg, "bio_break_max_sec", 240.0),
+                        )
+                        self.log_event("bio-break", f"taking a human bio-break ({int(break_sec)}s) after consecutive games")
+                        self.store.update(status=f"bio-break ({int(break_sec)}s)")
+                        self.stop_event.wait(break_sec)
+                        self.store.update(status="running")
                 # Always pause between games: joining back to back is
                 # what gets the account banned.
                 delay = self._next_delay()
@@ -747,6 +777,8 @@ class Bot:
             self._maybe_chat(sock)
             self._night_action(sock)
             self._protector_action(sock)
+            self._reviver_action(sock)
+            self._investigator_action(sock)
         elif event in ("game-night-started", "game-werewolves-vote-set"):
             self.state.apply(event, payload)
             self.store.update(phase=self.state.phase)
@@ -755,6 +787,8 @@ class Bot:
                 self._clear_actions()
             self._night_action(sock)
             self._protector_action(sock)
+            self._reviver_action(sock)
+            self._investigator_action(sock)
         elif event == "game-day-voting-started":
             self.state.apply(event, payload)
             self.store.update(phase=self.state.phase)
@@ -774,6 +808,9 @@ class Bot:
             "players-and-equipped-items",
         ):
             self.state.apply(event, payload)
+            if event == "game:chat-public:msg":
+                if getattr(self.cfg, "reflex_chat_enabled", True):
+                    self._handle_chat_reflex(sock, parse_payload(payload))
             if event in ("player-joined-and-equipped-items", "players-and-equipped-items"):
                 self.store.update(levels=self._player_levels())
             if event in ("game-players-killed", "game-reconnect-set-players"):
@@ -793,6 +830,8 @@ class Bot:
                 pass
             self.state.apply(event, payload)
             self.store.update(phase="game-over")
+            if getattr(self.cfg, "reflex_chat_enabled", True):
+                self._handle_game_over_reflex(sock)
         elif event == "error-user-banned":
             # The server bans players that join too often or leave a
             # lobby during the countdown.  The bot has to wait it out.
@@ -1233,17 +1272,11 @@ class Bot:
 
     def _killer_action(self, sock: SocketIOClient) -> None:
         event = KILLER_ROLES.get(self.state.role_id.lower())
-        if not event:
+        if not event or self._acted(event):
             return
-        # One kill per day.  The server repeats the day vote for every
-        # player that votes, so without this the bot would shoot the
-        # same victim over and over.
-        if self._acted(event):
-            return
-        data = self.state.day_votes
-        target = None
-        for value in data.values():
-            target = value
+        # One kill per day. In vill-win rooms, protect villagers by using safe mode
+        is_vill_win = "vill" in (self.cfg.room_names or "").lower()
+        target = self.policy.killer_target(self.state, safe_mode=is_vill_win)
         if target is None:
             self._acted_keys.discard(event)
             return
@@ -1257,9 +1290,7 @@ class Bot:
     def _protector_action(self, sock: SocketIOClient) -> None:
         """The doctor and the bodyguard pick somebody to protect."""
         event = PROTECTOR_ROLES.get(self.state.role_id.lower())
-        if not event:
-            return
-        if self._acted(event):
+        if not event or self._acted(event):
             return
         target = self.policy.protect_target(self.state)
         if target is None:
@@ -1271,9 +1302,77 @@ class Bot:
 
         self._queue_action(event, 3.0, 12.0, protect)
 
+    def _reviver_action(self, sock: SocketIOClient) -> None:
+        """The medium revives a fallen villager."""
+        event = REVIVER_ROLES.get(self.state.role_id.lower())
+        if not event or self._acted(event):
+            return
+        target = self.policy.revive_target(self.state)
+        if target is None:
+            return
+
+        def revive() -> None:
+            sock.emit(event, json.dumps({"targetPlayerId": target}))
+            self.log_event("action", f"{event} -> {target}")
+
+        self._queue_action(event, 3.0, 10.0, revive)
+
+    def _investigator_action(self, sock: SocketIOClient) -> None:
+        """The seer, aura seer, or detective reveals a player."""
+        event = INVESTIGATOR_ROLES.get(self.state.role_id.lower())
+        if not event or self._acted(event):
+            return
+        target = self.policy.reveal_target(self.state)
+        if target is None:
+            return
+
+        def reveal() -> None:
+            sock.emit(event, json.dumps({"targetPlayerId": target}))
+            self.log_event("action", f"{event} -> {target}")
+
+        self._queue_action(event, 2.5, 8.0, reveal)
+
+    def _handle_chat_reflex(self, sock: SocketIOClient, data: Any) -> None:
+        if not hasattr(self, "reflex") or not isinstance(data, dict):
+            return
+        msg = data.get("msg") or ""
+        author_id = data.get("authorId")
+        username = self.store.get().get("username") or ""
+        reply = self.reflex.decide_chat_response(
+            msg=msg,
+            author_id=author_id,
+            state=self.state,
+            own_username=username,
+        )
+        if not reply:
+            return
+        delay = self.reflex.calculate_typing_delay(reply)
+        self.reflex.note_reply(reply)
+
+        def speak() -> None:
+            self.chat(sock, reply)
+            self.log_event("chat", f"reflex said: {reply}")
+
+        self._queue_action("reflex chat", delay * 0.8, delay * 1.2, speak)
+
+    def _handle_game_over_reflex(self, sock: SocketIOClient) -> None:
+        if not hasattr(self, "reflex"):
+            return
+        gg = self.reflex.decide_game_over_response()
+        if not gg:
+            return
+        self.reflex.note_reply(gg)
+
+        def say_gg() -> None:
+            self.chat(sock, gg)
+            self.log_event("chat", f"reflex said: {gg}")
+
+        self._queue_action("reflex gg", 1.5, 3.5, say_gg)
+
     # ------------------------------------------------------------------
     def chat(self, sock: SocketIOClient, message: str) -> None:
-        if not self.cfg.chat_enabled or not message:
+        allowed = self.cfg.chat_enabled or getattr(self.cfg, "reflex_chat_enabled", False)
+        if not allowed or not message:
             return
         try:
             sock.emit("game:chat-public:msg", json.dumps({"msg": message}))

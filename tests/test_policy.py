@@ -158,6 +158,88 @@ class ProtectTargetTest(unittest.TestCase):
         state = state_with([{"id": 1, "username": "me"}])
         self.assertIsNone(policy.protect_target(state))
 
+    def test_protects_known_seer_first(self) -> None:
+        policy = Policy()
+        state = state_with(
+            [
+                {"id": 1, "username": "me"},
+                {"id": 2, "username": "bob", "role": "villager", "level": 10},
+                {"id": 3, "username": "carl", "role": "seer", "level": 5},
+            ]
+        )
+        self.assertEqual(policy.protect_target(state), 3)
+
+
+class ReviveTargetTest(unittest.TestCase):
+    def test_medium_revives_dead_villager_not_dead_wolf(self) -> None:
+        policy = Policy()
+        state = state_with(
+            [
+                {"id": 1, "username": "me"},
+                {"id": 2, "username": "wolf", "isAlive": False, "role": "werewolf", "team": "WEREWOLF"},
+                {"id": 3, "username": "good", "isAlive": False, "role": "villager", "team": "VILLAGE", "level": 50},
+            ]
+        )
+        self.assertEqual(policy.revive_target(state), 3)
+
+    def test_medium_revives_highest_level_villager(self) -> None:
+        policy = Policy()
+        state = state_with(
+            [
+                {"id": 1, "username": "me"},
+                {"id": 2, "username": "low", "isAlive": False, "role": "villager", "level": 10},
+                {"id": 3, "username": "high", "isAlive": False, "role": "doctor", "level": 80},
+            ]
+        )
+        self.assertEqual(policy.revive_target(state), 3)
+
+    def test_medium_returns_none_if_no_dead(self) -> None:
+        policy = Policy()
+        state = state_with(
+            [
+                {"id": 1, "username": "me"},
+                {"id": 2, "username": "bob", "isAlive": True},
+            ]
+        )
+        self.assertIsNone(policy.revive_target(state))
+
+
+class RevealTargetTest(unittest.TestCase):
+    def test_seer_picks_unrevealed_player(self) -> None:
+        policy = Policy()
+        state = state_with(
+            [
+                {"id": 1, "username": "me"},
+                {"id": 2, "username": "known", "role": "doctor"},
+                {"id": 3, "username": "unknown", "role": ""},
+            ]
+        )
+        self.assertEqual(policy.reveal_target(state), 3)
+
+
+class KillerTargetTest(unittest.TestCase):
+    def test_safe_mode_suppresses_without_signal(self) -> None:
+        policy = Policy()
+        state = state_with(
+            [
+                {"id": 1, "username": "me"},
+                {"id": 2, "username": "bob"},
+                {"id": 3, "username": "carl"},
+            ]
+        )
+        self.assertIsNone(policy.killer_target(state, safe_mode=True))
+
+    def test_safe_mode_kills_confirmed_wolf(self) -> None:
+        policy = Policy()
+        state = state_with(
+            [
+                {"id": 1, "username": "me"},
+                {"id": 2, "username": "bob", "role": "villager"},
+                {"id": 3, "username": "bad", "role": "werewolf", "team": "WEREWOLF"},
+            ]
+        )
+        self.assertEqual(policy.killer_target(state, safe_mode=True), 3)
+
 
 if __name__ == "__main__":
     unittest.main()
