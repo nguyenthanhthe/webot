@@ -113,6 +113,10 @@ class Config:
     # matching room is left alone this round and the bot looks again
     # after the normal wait.
     room_skip_chance: float = 0.15
+    # Small vill-win rooms rotate their games faster, which pays more
+    # per hour than waiting for a full sixteen.  When true the room
+    # pick prefers the smallest matches.
+    prefer_small_rooms: bool = True
     request_timeout_sec: float = 20.0
     max_retries: int = 3
     # How often the account profile is read.  The profile carries the

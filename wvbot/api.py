@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 import re
 import unicodedata
-from typing import Any
+from typing import Any, Callable
 
 from .config import CORE_URL, Config
 from .http_client import HttpClient
@@ -23,14 +23,29 @@ log = logging.getLogger("wvbot.api")
 
 
 class GameApi:
-    def __init__(self, cfg: Config, http: HttpClient, auth_headers: dict[str, str] | None = None):
+    def __init__(
+        self,
+        cfg: Config,
+        http: HttpClient,
+        auth_headers: dict[str, str] | Callable[[], dict[str, str]] | None = None,
+    ):
         self.cfg = cfg
         self.http = http
-        self.auth_headers = dict(auth_headers or {})
+        self._auth_headers = auth_headers
         # How many rooms matched the name in the last search, and how
         # many of them were locked behind a password.
         self.last_matching = 0
         self.last_locked = 0
+
+    @property
+    def auth_headers(self) -> dict[str, str]:
+        if callable(self._auth_headers):
+            return self._auth_headers()
+        return dict(self._auth_headers or {})
+
+    @auth_headers.setter
+    def auth_headers(self, value: dict[str, str] | Callable[[], dict[str, str]] | None) -> None:
+        self._auth_headers = value
 
     # ------------------------------------------------------------------
     def list_custom_games(self, language: str | None = None) -> list[dict[str, Any]]:

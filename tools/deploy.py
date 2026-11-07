@@ -34,9 +34,20 @@ ZIP = "wvbot.zip"
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def resolve_serial() -> str:
+    res = subprocess.run(["adb", "devices"], capture_output=True, text=True, check=False)
+    lines = [line.split()[0] for line in res.stdout.strip().splitlines()[1:] if "\tdevice" in line]
+    if SERIAL in lines:
+        return SERIAL
+    if lines:
+        return lines[0]
+    return SERIAL
+
+
 def adb(*args: str, timeout: int = 90) -> str:
+    target = resolve_serial()
     result = subprocess.run(
-        ["adb", "-s", SERIAL, *args],
+        ["adb", "-s", target, *args],
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -90,6 +101,7 @@ def main() -> int:
     print(restart or "(no output)")
 
     print("== waiting for the dashboard ==")
+    adb("forward", f"tcp:{PORT}", f"tcp:{PORT}")
     status = {}
     for _ in range(20):
         time.sleep(3)

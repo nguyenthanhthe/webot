@@ -170,8 +170,8 @@ class RoomSkipTest(unittest.TestCase):
 
 
 class PickRoomTest(unittest.TestCase):
-    def _bot(self) -> Bot:
-        return shell(store=StatusStore())
+    def _bot(self, prefer_small: bool = True) -> Bot:
+        return shell(store=StatusStore(), cfg=types.SimpleNamespace(prefer_small_rooms=prefer_small))
 
     def test_empty_list_gives_none(self) -> None:
         self.assertIsNone(self._bot()._pick_room([]))
@@ -180,21 +180,40 @@ class PickRoomTest(unittest.TestCase):
         room = {"gameId": 1}
         self.assertEqual(self._bot()._pick_room([room]), room)
 
-    def test_low_xp_rooms_are_left_alone(self) -> None:
-        good = {"gameId": 1, "regularXp": 20}
-        other_good = {"gameId": 2, "regularXp": 18}
-        poor = {"gameId": 3, "regularXp": 5}
+    def test_rooms_without_the_xp_flag_are_left_alone(self) -> None:
+        good = {"gameId": 1, "regularXp": True}
+        poor = {"gameId": 2, "regularXp": False}
         pick = self._bot()._pick_room
         for _ in range(40):
-            self.assertIn(pick([good, other_good, poor]), (good, other_good))
+            self.assertEqual(pick([good, poor]), good)
+
+    def test_small_rooms_are_preferred(self) -> None:
+        # The fast-rotating eight-seat rooms pay more per hour than a
+        # full sixteen.
+        small = {"gameId": 1, "regularXp": True, "playerCount": 8}
+        small2 = {"gameId": 2, "regularXp": True, "playerCount": 9}
+        full = {"gameId": 3, "regularXp": True, "playerCount": 16}
+        pick = self._bot()._pick_room
+        for _ in range(40):
+            self.assertIn(pick([small, small2, full]), (small, small2))
+
+    def test_the_small_preference_can_be_switched_off(self) -> None:
+        small = {"gameId": 1, "regularXp": True, "playerCount": 8}
+        full = {"gameId": 2, "regularXp": True, "playerCount": 16}
+        pick = self._bot(prefer_small=False)._pick_room
+        seen = {pick([small, full])["gameId"] for _ in range(60)}
+        self.assertEqual(seen, {1, 2})
+
+    def test_nearly_empty_rooms_are_not_called_small(self) -> None:
+        # A room of two is still filling up, not fast.
+        filling = {"gameId": 1, "regularXp": True, "playerCount": 2}
+        medium = {"gameId": 2, "regularXp": True, "playerCount": 9}
+        pick = self._bot()._pick_room
+        for _ in range(40):
+            self.assertIn(pick([filling, medium]), (filling, medium))
 
     def test_without_xp_data_the_choice_is_free(self) -> None:
         a = {"gameId": 1}
-        b = {"gameId": 2}
-        self.assertIn(self._bot()._pick_room([a, b]), (a, b))
-
-    def test_a_broken_xp_value_counts_as_zero(self) -> None:
-        a = {"gameId": 1, "regularXp": "many"}
         b = {"gameId": 2}
         self.assertIn(self._bot()._pick_room([a, b]), (a, b))
 
@@ -495,6 +514,21 @@ class AliveCountTest(unittest.TestCase):
 
 
 class ProjectionTest(unittest.TestCase):
+    def test_the_rate_comes_from_the_day_history(self) -> None:
+        bot = shell(store=StatusStore())
+        # Five hours of the UTC day are gone, 100 xp farmed.
+        now = time.time()
+        bot.store.update(history={"today_xp": 100, "today_games": 3})
+        with mock.patch.object(bot_module.time, "time", return_value=(5 * 3600)):
+            projection = bot._projection()
+        self.assertEqual(projection["xp_per_hour"], 20)
+
+    def test_an_empty_day_falls_back_to_the_session(self) -> None:
+        bot = shell(store=StatusStore())
+        bot.store.update(xp_total=100, history={"today_xp": 0})
+        bot.store.update(started_at=time.time() - 3600)
+        projection = bot._projection()
+        self.assertEqual(projection["xp_per_hour"], 100)
     def test_rate_and_hours_to_next_level(self) -> None:
         bot = shell(store=StatusStore())
         bot.store.update(
