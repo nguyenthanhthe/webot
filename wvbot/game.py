@@ -30,9 +30,9 @@ log = logging.getLogger("wvbot.game")
 
 WOLF_TEAMS = {"WEREWOLF", "WOLF", "EVIL", "WEREWOLVES"}
 
-# Fast regex for detecting wolf claims in chat (e.g. "5 w", "w 5", "5 wolf", "im 5 w", "5 ww", "ww 5", "s5 w", "seat 5 ww")
+# Fast regex for detecting wolf claims in chat (e.g. "5 w", "w 5", "5 wolf", "im 5 w", "5 ww", "ww 5", "s5 w", "seat 5 ww", "14 is ww")
 WOLF_CLAIM_RE = re.compile(
-    r"(?:^|\b)(?:(?:im|i\s*am|me)\s+)?(?:(?:seat|s)?\s*(\d{1,2})\s*(?:w|ww|wolf|werewolf|m|soi|ma)\b|(?:w|ww|wolf|werewolf|m|soi|ma)\s*(?:seat|s)?\s*(\d{1,2})\b)",
+    r"(?:^|\b)(?:(?:im|i\s*am|me)\s+)?(?:(?:seat|s)?\s*(\d{1,2})[\s:=]*(?:is\s+)?(?:w|ww|wolf|werewolf|m|soi|ma)\b|(?:w|ww|wolf|werewolf|m|soi|ma)[\s:=]*(?:is\s+)?(?:seat|s)?\s*(\d{1,2})\b)",
     re.IGNORECASE,
 )
 

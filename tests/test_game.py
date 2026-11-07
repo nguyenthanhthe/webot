@@ -264,6 +264,10 @@ class GameStateEventTest(unittest.TestCase):
         state.apply("game:chat-public:msg", {"authorId": "p2", "msg": "im ww"})
         self.assertEqual(state.claimed_wolf_id, "p2")
 
+        # "2 is ww" claim (observed in live games)
+        state.apply("game:chat-public:msg", {"authorId": "p1", "msg": "2 is ww"})
+        self.assertEqual(state.claimed_wolf_id, "p2")
+
     def test_bandwagon_voting(self) -> None:
         from wvbot.game import Policy
         state = make_state()

@@ -28,6 +28,7 @@
   "strict_8p_only": false,
   "stay_in_room": true,
   "stay_in_room_timeout_sec": 60.0,
+  "stay_in_room_max_game_duration_sec": 150.0,
   "claim_double_xp": true,
   "reflex_chat_enabled": true,
   "chat_enabled": false,
