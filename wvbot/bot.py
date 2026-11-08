@@ -349,6 +349,11 @@ class Bot:
             fast_rooms.sort(key=lambda r: int(r.get("playerCount") or 0), reverse=True)
             return fast_rooms[0]
 
+        # In fast-farm mode, avoid falling back to slow casual rooms where matches drag on 10-15m
+        # and human players roleplay or report bots for not playing standard games.
+        if getattr(self.cfg, "strict_tf_only", False):
+            return None
+
         if getattr(self.cfg, "strict_8p_only", False):
             rooms = [r for r in rooms if is_8p_room(r)]
             if not rooms:

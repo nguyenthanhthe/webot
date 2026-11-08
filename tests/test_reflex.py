@@ -85,6 +85,46 @@ class ReflexEngineTest(unittest.TestCase):
         )
         self.assertIsNone(reply)
 
+    def test_direct_mention_role_claim_aura_seer(self) -> None:
+        self.state.role_id = "aura-seer"
+        reply = self.engine.decide_chat_response(
+            msg="14 role?",
+            author_id="p1",
+            state=self.state,
+            own_username="botzxc",
+            now=10.0,
+        )
+        self.assertEqual(reply, "im as")
+
+    def test_direct_mention_role_claim_werewolf(self) -> None:
+        self.state.role_id = "werewolf"
+        reply = self.engine.decide_chat_response(
+            msg="14 claim",
+            author_id="p1",
+            state=self.state,
+            own_username="botzxc",
+            now=10.0,
+        )
+        self.assertIn(reply, ["w", "im ww", "ww"])
+
+    def test_direct_mention_role_claim_repeated(self) -> None:
+        self.state.role_id = "aura-seer"
+        self.engine.decide_chat_response(
+            msg="14 role?",
+            author_id="p1",
+            state=self.state,
+            own_username="botzxc",
+            now=10.0,
+        )
+        reply = self.engine.decide_chat_response(
+            msg="14 role please",
+            author_id="p1",
+            state=self.state,
+            own_username="botzxc",
+            now=25.0,  # Within 45s window
+        )
+        self.assertIn(reply, ["already said", "told u", "said it"])
+
     def test_typing_delay_calculation(self) -> None:
         delay_short = self.engine.calculate_typing_delay("v")
         delay_long = self.engine.calculate_typing_delay("this is a longer sentence for test")
