@@ -1,3 +1,3 @@
-"""Wolvesville custom-game farming bot enterprise (v1.0.7 - Smart Room Timer & Accusation Seat Detection)."""
+"""Wolvesville custom-game farming bot enterprise (v1.0.8 - Universal Role Claim & Strict TF Guard)."""
 
-__version__ = "1.0.7"
+__version__ = "1.0.8"

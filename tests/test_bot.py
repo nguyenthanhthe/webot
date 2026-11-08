@@ -1054,93 +1054,19 @@ class TurboVillWinFarmTest(unittest.TestCase):
         self.assertIsNotNone(picked)
         self.assertEqual(picked["gameId"], "room-tf")
 
-    def test_pick_room_never_picks_16p_when_prefer_8p(self) -> None:
+    def test_strict_tf_only_rejects_non_tf_rooms(self) -> None:
         cfg = types.SimpleNamespace(
             prefer_small_rooms=True,
             prefer_8p_rooms=True,
-        )
-        bot = shell(cfg=cfg, log_event=mock.MagicMock())
-        rooms = [
-            {"gameId": "room-16p-1", "name": "Vill Win 16P (E)", "regularXp": True, "playerCount": 14, "maxPlayerCount": 16},
-            {"gameId": "room-16p-2", "name": "Vill Win 16P (F)", "regularXp": True, "playerCount": 4, "maxPlayerCount": 16},
-        ]
-        picked = bot._pick_room(rooms)
-        self.assertIsNone(picked)
-
-    def test_pick_room_detects_8p_via_get_game_settings(self) -> None:
-        cfg = types.SimpleNamespace(
-            prefer_small_rooms=True,
-            prefer_8p_rooms=True,
-        )
-        fake_api = mock.MagicMock()
-        def fake_settings(gid, locale="en"):
-            if gid == "r1":
-                return {"maxPlayerCount": 16}
-            if gid == "r2":
-                return {"maxPlayerCount": 8}
-            return {}
-        fake_api.get_game_settings.side_effect = fake_settings
-        bot = shell(cfg=cfg, api=fake_api, log_event=mock.MagicMock())
-        rooms = [
-            {"gameId": "r1", "name": "vill win", "regularXp": True, "playerCount": 4},
-            {"gameId": "r2", "name": "vill win", "regularXp": True, "playerCount": 6},
-        ]
-        picked = bot._pick_room(rooms)
-        self.assertIsNotNone(picked)
-        self.assertEqual(picked["gameId"], "r2")
-        cfg = types.SimpleNamespace(
-            prefer_small_rooms=True,
-            prefer_8p_rooms=True,
-        )
-    def test_pick_room_prioritizes_tf_duration(self) -> None:
-        cfg = types.SimpleNamespace(
-            prefer_small_rooms=True,
-            prefer_8p_rooms=True,
+            strict_tf_only=True,
         )
         bot = shell(cfg=cfg)
-        rooms = [
-            {"gameId": "room-normal", "name": "Vill Win Normal", "dayDiscussionDurationInMs": 60000, "playerCount": 10},
-            {"gameId": "room-tf", "name": "Vill Win Fast", "dayDiscussionDurationInMs": 15000, "playerCount": 5},
+        slow_rooms = [
+            {"gameId": "room-slow", "name": "VIll WIN EEE", "dayDiscussionDurationInMs": 60000, "playerCount": 14},
+            {"gameId": "room-normal", "name": "Vill Win Casual", "dayDiscussionDurationInMs": 60000, "playerCount": 10},
         ]
-        picked = bot._pick_room(rooms)
-        self.assertIsNotNone(picked)
-        self.assertEqual(picked["gameId"], "room-tf")
-
-    def test_pick_room_never_picks_16p_when_prefer_8p(self) -> None:
-        cfg = types.SimpleNamespace(
-            prefer_small_rooms=True,
-            prefer_8p_rooms=True,
-        )
-        bot = shell(cfg=cfg, log_event=mock.MagicMock())
-        rooms = [
-            {"gameId": "room-16p-1", "name": "Vill Win 16P (E)", "regularXp": True, "playerCount": 14, "maxPlayerCount": 16},
-            {"gameId": "room-16p-2", "name": "Vill Win 16P (F)", "regularXp": True, "playerCount": 4, "maxPlayerCount": 16},
-        ]
-        picked = bot._pick_room(rooms)
+        picked = bot._pick_room(slow_rooms)
         self.assertIsNone(picked)
-
-    def test_pick_room_detects_8p_via_get_game_settings(self) -> None:
-        cfg = types.SimpleNamespace(
-            prefer_small_rooms=True,
-            prefer_8p_rooms=True,
-        )
-        fake_api = mock.MagicMock()
-        def fake_settings(gid, locale="en"):
-            if gid == "r1":
-                return {"maxPlayerCount": 16}
-            if gid == "r2":
-                return {"maxPlayerCount": 8}
-            return {}
-        fake_api.get_game_settings.side_effect = fake_settings
-        bot = shell(cfg=cfg, api=fake_api, log_event=mock.MagicMock())
-        rooms = [
-            {"gameId": "r1", "name": "vill win", "regularXp": True, "playerCount": 4},
-            {"gameId": "r2", "name": "vill win", "regularXp": True, "playerCount": 6},
-        ]
-        picked = bot._pick_room(rooms)
-        self.assertIsNotNone(picked)
-        self.assertEqual(picked["gameId"], "r2")
-
     def test_wolf_self_claim_emits_seat_number(self) -> None:
         state = types.SimpleNamespace(
             is_wolf=True,

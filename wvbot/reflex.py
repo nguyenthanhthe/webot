@@ -43,6 +43,39 @@ SKIP_ECHO_REPLIES = [
     "skip please",
 ]
 
+ROLE_SHORT_NAMES: dict[str, str] = {
+    "aura-seer": "as",
+    "seer": "seer",
+    "spirit-seer": "ss",
+    "medium": "med",
+    "doctor": "doc",
+    "bodyguard": "bg",
+    "detective": "det",
+    "sheriff": "sheriff",
+    "marksman": "mm",
+    "gunner": "gunner",
+    "jailer": "jailer",
+    "beast-hunter": "bh",
+    "priest": "priest",
+    "red-lady": "rl",
+    "forger": "forger",
+    "witch": "witch",
+    "corruptor": "corruptor",
+    "cupid": "cupid",
+    "fool": "fool",
+    "headhunter": "hh",
+    "villager": "vill",
+    "mayor": "mayor",
+    "clerk": "clerk",
+    "flower-child": "fc",
+    "pacifist": "paci",
+    "grumpy-grandma": "grandma",
+    "avenger": "avenger",
+    "loudmouth": "lm",
+    "trapper": "trapper",
+    "trappers": "trapper",
+}
+
 
 class ReflexEngine:
     """Evaluates incoming public chat messages and generates human-like reflexes."""
@@ -130,15 +163,18 @@ class ReflexEngine:
 
         if mentioned:
             # If asked directly about role
-            role_id = (getattr(state, "role_id", "") or "").lower()
-            if any(k in clean for k in ("role", "claim", "what are you", "who r u")):
-                if role_id in ("medium", "seer", "doctor", "bodyguard", "villager"):
-                    if self.last_claimed_role == role_id and (now - self.last_claim_time) < 60.0:
-                        return random.SystemRandom().choice(["already said", "told u", "med" if role_id == "medium" else role_id])
-                    self.last_claimed_role = role_id
-                    claim = "im " + ("doc" if role_id == "doctor" else role_id)
-                    return claim
-            # Generic response to being called out / pinged
+            role_id = (getattr(state, "role_id", "") or "").lower().strip()
+            is_role_query = any(k in clean for k in ("role", "claim", "what are you", "who r u", "who are you"))
+            if is_role_query:
+                if self.last_claimed_role == role_id and (now - self.last_claim_time) < 45.0:
+                    return random.SystemRandom().choice(["already said", "told u", "said it"])
+                self.last_claimed_role = role_id
+                if "wolf" in role_id or "werewolf" in role_id:
+                    return random.SystemRandom().choice(["w", "im ww", "ww"])
+                short_role = ROLE_SHORT_NAMES.get(role_id, role_id.replace("-", " ") if role_id else "vill")
+                return f"im {short_role}"
+
+            # Generic response to being called out / pinged (never use filler if asked for role)
             choices = [c for c in BOT_CHECK_REPLIES if c != self.last_reply_text]
             return random.SystemRandom().choice(choices or BOT_CHECK_REPLIES)
 
