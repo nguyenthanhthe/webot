@@ -173,7 +173,27 @@ PAGE = """<!doctype html>
 
 <div class="sec-title" style="display:flex; justify-content:space-between; align-items:center;">
   <span>📋 Farm Roster & Accounts</span>
-  <button onclick="toggleAddForm()" style="background:#064e3b; border-color:#059669; color:#34d399;">+ Add Bot</button>
+  <div style="display:flex; gap:8px;">
+    <button onclick="toggleProvisionForm()" style="background:#4338ca; border-color:#6366f1; color:#c7d2fe;">⚡ 1-Click Temp Mail Farm</button>
+    <button onclick="toggleAddForm()" style="background:#064e3b; border-color:#059669; color:#34d399;">+ Add Bot</button>
+  </div>
+</div>
+<div id="provision-panel" style="display:none; background:#181b20; border:1px solid #4338ca; border-radius:8px; padding:12px; margin-bottom:16px;">
+  <div style="font-weight:bold; margin-bottom:8px; font-size:13px; color:#818cf8;">⚡ 1-Click Cloudflare Temp Email Farm Creator</div>
+  <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:8px;">
+    <input type="text" id="prov-url" placeholder="Worker URL (e.g. https://mail.example.com)" style="flex:2; min-width:240px;">
+    <input type="password" id="prov-admin" placeholder="Admin Secret" style="flex:1; min-width:140px;">
+    <input type="text" id="prov-domain" placeholder="Domain (optional)" style="width:140px;">
+    <select id="prov-count" style="background:#181b20; border:1px solid #373e47; color:#e6e6e6; border-radius:6px; padding:5px 8px; font-size:12px;">
+      <option value="1">1 Bot</option>
+      <option value="2">2 Bots</option>
+      <option value="3">3 Bots</option>
+      <option value="4">4 Bots</option>
+    </select>
+    <button onclick="submitProvision()" style="background:#4f46e5; border-color:#818cf8; color:#fff; font-weight:bold;">🚀 Create & Farm</button>
+    <button onclick="toggleProvisionForm()">Cancel</button>
+  </div>
+  <div id="prov-msg" style="font-size:11px; margin-top:6px; color:#94a3b8;">Uses Cloudflare Temp Email API to generate mailboxes, intercept confirmation codes, and launch farm bots in 1 click.</div>
 </div>
 <div id="add-account-panel" style="display:none; background:#181b20; border:1px solid #282e38; border-radius:8px; padding:12px; margin-bottom:16px;">
   <div style="font-weight:bold; margin-bottom:8px; font-size:13px; color:#38bdf8;">Add Account to Roster</div>
@@ -285,6 +305,45 @@ async function fetchEvents() {
         `<tr><td class="t">${fmt(e.ts)}</td><td>${e.kind}</td><td>${e.message}</td></tr>`).join('');
     }
   } catch (_) {}
+}
+
+function toggleProvisionForm() {
+  const panel = document.getElementById('provision-panel');
+  panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+  document.getElementById('prov-msg').innerText = '';
+}
+
+async function submitProvision() {
+  const url = document.getElementById('prov-url').value.trim();
+  const admin = document.getElementById('prov-admin').value.trim();
+  const domain = document.getElementById('prov-domain').value.trim();
+  const count = parseInt(document.getElementById('prov-count').value || '1', 10);
+  const msg = document.getElementById('prov-msg');
+  if (!url || !admin) {
+    msg.innerText = 'Please provide both Worker URL and Admin Secret.';
+    msg.style.color = '#ef4444';
+    return;
+  }
+  msg.innerText = 'Starting 1-click provisioning for ' + count + ' bot(s)... Check Event Stream for live progress.';
+  msg.style.color = '#818cf8';
+  try {
+    const res = await fetch('/api/provision', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({url, admin, domain, count})
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      msg.innerText = data.error || 'Provisioning failed.';
+      msg.style.color = '#ef4444';
+    } else {
+      msg.innerText = 'Provisioning initiated! Watch Event Stream below.';
+      msg.style.color = '#34d399';
+    }
+  } catch (err) {
+    msg.innerText = 'Request error: ' + err;
+    msg.style.color = '#ef4444';
+  }
 }
 
 function toggleAddForm() {
@@ -605,6 +664,52 @@ class _Handler(BaseHTTPRequestHandler):
                 )
             except Exception as exc:  # noqa: BLE001
                 self._send(400, json.dumps({"error": str(exc)}).encode(), "application/json")
+            return
+        elif self.path.startswith("/api/provision") or kind == "provision":
+            from .config import STATE_DIR
+            from .provision import AccountProvisioner
+
+            url = str(payload.get("url") or payload.get("temp_email_url") or "").strip()
+            admin = str(payload.get("admin") or payload.get("admin_password") or "").strip()
+            domain = payload.get("domain") or None
+            site_auth = payload.get("site_auth") or None
+            count = int(payload.get("count") or 1)
+
+            if not url or not admin:
+                self._send(400, b'{"error":"missing temp email url or admin password"}', "application/json")
+                return
+
+            root = (
+                self.farm.farm_root
+                if self.farm and getattr(self.farm, "farm_root", None)
+                else STATE_DIR
+            )
+            provisioner = AccountProvisioner(
+                temp_email_url=url,
+                admin_password=admin,
+                site_password=site_auth,
+                domain=domain,
+            )
+
+            def _do_provision():
+                try:
+                    if self.store is not None:
+                        self.store.add_event("provision", f"Starting 1-click provisioning for {count} bot(s)...")
+                    created = provisioner.batch_provision(
+                        count=count,
+                        farm_root=root,
+                        farm_instance=self.farm,
+                        progress_callback=lambda msg, pct: self.store.add_event("provision", msg) if self.store else None,
+                    )
+                    if self.store is not None:
+                        self.store.add_event("provision", f"Successfully provisioned {len(created)} bot account(s) into farm!")
+                except Exception as exc:  # noqa: BLE001
+                    log.error("Provisioning failed: %s", exc)
+                    if self.store is not None:
+                        self.store.add_event("error", f"Provisioning failed: {exc}")
+
+            threading.Thread(target=_do_provision, name="provisioner", daemon=True).start()
+            self._send(200, json.dumps({"ok": True, "message": "Provisioning started in background"}).encode(), "application/json")
             return
         elif kind == "reward":
             action = str(payload.get("action") or "")
