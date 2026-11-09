@@ -1,3 +1,3 @@
-"""Wolvesville custom-game farming bot enterprise (v1.0.8 - Universal Role Claim & Strict TF Guard)."""
+"""Wolvesville custom-game farming bot enterprise (v1.0.9 - Leakproof Ban Sleep & Maintenance)."""
 
-__version__ = "1.0.8"
+__version__ = "1.0.9"

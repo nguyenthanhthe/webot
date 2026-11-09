@@ -491,6 +491,8 @@ class Bot:
                 self.stop_event.wait(min(wait + 5, 7200))
                 if self.stop_event.is_set():
                     break
+                if time.time() < self._banned_until:
+                    continue
                 self._banned_until = 0.0
                 self.store.update(banned_until=None)
             self._banned.clear()
