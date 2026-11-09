@@ -28,8 +28,8 @@ logging.basicConfig(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="1-Click Cloudflare Temp Email Farm Provisioner")
-    parser.add_argument("--url", required=True, help="Base URL of Cloudflare Temp Email Worker")
-    parser.add_argument("--admin", required=True, help="Admin password for Worker (/admin/new_address)")
+    parser.add_argument("--url", default="auto", help="Base URL")
+    parser.add_argument("--admin", default=None, help="Admin password")
     parser.add_argument("--site-auth", default=None, help="Optional x-custom-auth site password")
     parser.add_argument("--domain", default=None, help="Optional domain for email addresses")
     parser.add_argument("--count", type=int, default=1, help="Number of bot accounts to provision (default: 1)")

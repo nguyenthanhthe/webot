@@ -22,7 +22,7 @@ from typing import Any, Callable
 from .config import AUTH_URL, STATE_DIR
 from .farm import save_account_to_roster
 from .http_client import HttpClient
-from .temp_email import Mailbox, TempEmailClient, TempEmailError
+from .temp_email import Mailbox, MailTmClient, TempEmailClient, TempEmailError
 
 log = logging.getLogger("wvbot.provision")
 
@@ -48,17 +48,21 @@ class AccountProvisioner:
 
     def __init__(
         self,
-        temp_email_url: str,
+        temp_email_url: str | None = None,
         admin_password: str | None = None,
         site_password: str | None = None,
         domain: str | None = None,
         http_client: HttpClient | None = None,
     ):
-        self.temp_email = TempEmailClient(
-            base_url=temp_email_url,
-            admin_password=admin_password,
-            site_password=site_password,
-        )
+        clean_url = (temp_email_url or '').strip().lower()
+        if clean_url and clean_url not in ('auto', 'mail.tm', 'none', ''):
+            self.temp_email = TempEmailClient(
+                base_url=temp_email_url,
+                admin_password=admin_password,
+                site_password=site_password,
+            )
+        else:
+            self.temp_email = MailTmClient()
         self.domain = domain
         self.http = http_client or HttpClient()
 
@@ -78,14 +82,14 @@ class AccountProvisioner:
             if progress_callback:
                 progress_callback(step_text, pct)
 
-        report("1/5 Creating Cloudflare Temp Mailbox...", 0.1)
+        report("1/5 Creating Temp Mailbox...", 0.1)
         username = name or generate_username()
         pwd = password or generate_password()
 
         try:
             mailbox = self.temp_email.create_mailbox(name=username, domain=self.domain)
         except Exception as exc:
-            raise ProvisionError(f"Failed to create mailbox via Cloudflare Worker: {exc}") from exc
+            raise ProvisionError(f"Failed to create mailbox : {exc}") from exc
 
         report(f"2/5 Mailbox created: {mailbox.address}", 0.3)
 

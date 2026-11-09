@@ -172,6 +172,130 @@ class TempEmailClient:
         return None
 
 
+class MailTmClient:
+    """Zero-config open temporary email client using api.mail.tm.
+
+    Requires no Cloudflare account, no Worker deployment, and zero setup.
+    """
+
+    def __init__(self, timeout: float = 15.0):
+        self.base_url = "https://api.mail.tm"
+        self.timeout = timeout
+
+    def _req(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+        jwt: str | None = None,
+    ) -> Any:
+        url = f"{self.base_url}{path}"
+        headers: dict[str, str] = {
+            "Accept": "application/json",
+            "User-Agent": "wvbot-provisioner/1.1",
+        }
+        if jwt:
+            headers["Authorization"] = f"Bearer {jwt}"
+        data = None
+        if payload is not None:
+            headers["Content-Type"] = "application/json"
+            data = json.dumps(payload).encode("utf-8")
+
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                raw = resp.read()
+                return json.loads(raw.decode("utf-8")) if raw else None
+        except urllib.error.HTTPError as exc:
+            try:
+                err_body = exc.read().decode("utf-8", errors="replace")
+            finally:
+                exc.close()
+            raise TempEmailError(f"Mail.tm HTTP {exc.code} for {url}: {err_body}") from exc
+        except Exception as exc:
+            raise TempEmailError(f"Mail.tm request failed for {url}: {exc}") from exc
+
+    def get_domains(self) -> list[str]:
+        data = self._req("GET", "/domains")
+        items = data if isinstance(data, list) else (data.get("hydra:member") or [])
+        return [item["domain"] for item in items if item.get("isActive")]
+
+    def create_mailbox(
+        self,
+        name: str | None = None,
+        domain: str | None = None,
+    ) -> Mailbox:
+        import random
+        import string
+
+        domains = self.get_domains()
+        chosen_domain = domain if domain and domain in domains else (domains[0] if domains else "fldubai.com")
+        prefix = name or ("wvbot_" + "".join(random.choices(string.ascii_lowercase, k=6)))
+        address = f"{prefix}@{chosen_domain}"
+        pwd = "P@" + "".join(random.choices(string.ascii_letters + string.digits, k=10)) + "1!"
+
+        try:
+            self._req("POST", "/accounts", {"address": address, "password": pwd})
+        except Exception:
+            suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=4))
+            address = f"{prefix}_{suffix}@{chosen_domain}"
+            self._req("POST", "/accounts", {"address": address, "password": pwd})
+
+        token_data = self._req("POST", "/token", {"address": address, "password": pwd})
+        jwt = str(token_data.get("token") or "")
+        if not jwt:
+            raise TempEmailError(f"No token received from mail.tm for {address}")
+        return Mailbox(address=address, jwt=jwt)
+
+    def list_messages(self, jwt: str, limit: int = 20) -> list[dict[str, Any]]:
+        data = self._req("GET", "/messages", jwt=jwt)
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            return data.get("hydra:member") or []
+        return []
+
+    def get_message(self, jwt: str, message_id: str) -> dict[str, Any]:
+        data = self._req("GET", f"/messages/{message_id}", jwt=jwt)
+        return data if isinstance(data, dict) else {}
+
+    def wait_for_verification_code(
+        self,
+        jwt: str,
+        timeout_sec: float = 120.0,
+        poll_interval_sec: float = 3.0,
+    ) -> str | None:
+        deadline = time.time() + timeout_sec
+        seen_ids: set[str] = set()
+
+        while time.time() < deadline:
+            try:
+                messages = self.list_messages(jwt)
+            except Exception as exc:
+                log.debug("Polling mail.tm inbox failed: %s", exc)
+                messages = []
+
+            for msg in messages:
+                msg_id = str(msg.get("id") or "")
+                if msg_id and msg_id in seen_ids:
+                    continue
+                if msg_id:
+                    seen_ids.add(msg_id)
+
+                detail = self.get_message(jwt, msg_id) if msg_id else msg
+                subject = str(detail.get("subject") or "")
+                text_content = str(detail.get("text") or detail.get("intro") or detail.get("html") or "")
+                full_body = f"{subject}\n{text_content}"
+
+                code = TempEmailClient.extract_verification_code(full_body)
+                if code:
+                    return code
+
+            time.sleep(poll_interval_sec)
+
+        return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Cloudflare Temp Email helper")
     subparsers = parser.add_subparsers(dest="cmd", required=True)
