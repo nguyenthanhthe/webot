@@ -79,5 +79,22 @@ class ProvisionTest(unittest.TestCase):
             self.assertIn(created[1]["name"], names)
 
 
+
+    @patch("wvbot.provision.MailTmClient")
+    def test_provision_account_mailtm_default(self, mock_mailtm_cls) -> None:
+        mock_client = MagicMock()
+        mock_mailtm_cls.return_value = mock_client
+        mock_client.create_mailbox.return_value = Mailbox(
+            address="auto_bot@fldubai.com", jwt="fake-mailtm-jwt"
+        )
+        mock_client.wait_for_verification_code.return_value = "777888"
+
+        provisioner = AccountProvisioner()  # Zero-config!
+        acc = provisioner.provision_account(name="auto_bot")
+        self.assertEqual(acc["name"], "auto_bot")
+        self.assertEqual(acc["email"], "auto_bot@fldubai.com")
+        self.assertEqual(acc["verification_code"], "777888")
+        self.assertEqual(acc["status"], "ready")
+
 if __name__ == "__main__":
     unittest.main()

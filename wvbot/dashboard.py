@@ -181,8 +181,8 @@ PAGE = """<!doctype html>
 <div id="provision-panel" style="display:none; background:#181b20; border:1px solid #4338ca; border-radius:8px; padding:12px; margin-bottom:16px;">
   <div style="font-weight:bold; margin-bottom:8px; font-size:13px; color:#818cf8;">⚡ 1-Click Cloudflare Temp Email Farm Creator</div>
   <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:8px;">
-    <input type="text" id="prov-url" placeholder="Worker URL (e.g. https://mail.example.com)" style="flex:2; min-width:240px;">
-    <input type="password" id="prov-admin" placeholder="Admin Secret" style="flex:1; min-width:140px;">
+    <input type="text" id="prov-url" placeholder="Worker URL (leave empty for Auto Zero-Config Mail.tm)" style="flex:2; min-width:240px;">
+    <input type="password" id="prov-admin" placeholder="Admin Secret (optional if Auto)" style="flex:1; min-width:140px;">
     <input type="text" id="prov-domain" placeholder="Domain (optional)" style="width:140px;">
     <select id="prov-count" style="background:#181b20; border:1px solid #373e47; color:#e6e6e6; border-radius:6px; padding:5px 8px; font-size:12px;">
       <option value="1">1 Bot</option>
@@ -319,12 +319,14 @@ async function submitProvision() {
   const domain = document.getElementById('prov-domain').value.trim();
   const count = parseInt(document.getElementById('prov-count').value || '1', 10);
   const msg = document.getElementById('prov-msg');
-  if (!url || !admin) {
-    msg.innerText = 'Please provide both Worker URL and Admin Secret.';
+  const isAuto = (!url || url.toLowerCase() === 'auto');
+  if (!isAuto && !admin) {
+    msg.innerText = 'Please provide Admin Secret for custom worker (or leave URL blank for Auto Zero-Config).';
     msg.style.color = '#ef4444';
     return;
   }
-  msg.innerText = 'Starting 1-click provisioning for ' + count + ' bot(s)... Check Event Stream for live progress.';
+  const modeStr = isAuto ? 'Auto Zero-Config' : 'Custom Worker';
+  msg.innerText = 'Starting 1-click ' + modeStr + ' provisioning for ' + count + ' bot(s)... Check Event Stream.';
   msg.style.color = '#818cf8';
   try {
     const res = await fetch('/api/provision', {
@@ -675,8 +677,9 @@ class _Handler(BaseHTTPRequestHandler):
             site_auth = payload.get("site_auth") or None
             count = int(payload.get("count") or 1)
 
-            if not url or not admin:
-                self._send(400, b'{"error":"missing temp email url or admin password"}', "application/json")
+            clean_url = (url or "").strip().lower()
+            if clean_url and clean_url not in ("auto", "mail.tm", "none") and not admin:
+                self._send(400, b'{"error":"missing admin password for custom worker"}', "application/json")
                 return
 
             root = (
