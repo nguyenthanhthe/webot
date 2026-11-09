@@ -53,6 +53,12 @@ class ParseBanUntilTest(unittest.TestCase):
     def test_garbage_is_no_ban(self) -> None:
         self.assertEqual(_parse_ban_until("yesterday maybe"), 0.0)
 
+    def test_ban_sleep_does_not_clear_while_in_future(self) -> None:
+        future = time.time() + 100000
+        bot = shell(store=StatusStore(), stop_event=threading.Event())
+        bot._banned_until = future
+        self.assertTrue(time.time() < bot._banned_until)
+
 
 class ExtractGameInfoTest(unittest.TestCase):
     def test_named_fields(self) -> None:
