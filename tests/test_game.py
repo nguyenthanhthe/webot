@@ -225,6 +225,7 @@ class GameStateEventTest(unittest.TestCase):
                 "players": [
                     {"id": "p1", "gridIdx": 0, "username": "player1"},
                     {"id": "p2", "gridIdx": 1, "username": "player2"},
+                    {"id": "p3", "gridIdx": 2, "username": "player3"},
                 ],
             },
         )
@@ -234,10 +235,15 @@ class GameStateEventTest(unittest.TestCase):
         self.assertEqual(state.claimed_wolf_id, "p2")
         self.assertEqual(state.claimed_wolf_seat, 2)
 
-        # Seat-based claim "1 m"
+        # Seat-based claim "3 m" updates claimed wolf to seat 3 (not own_id)
+        state.apply("game:chat-public:msg", {"authorId": "p2", "msg": "3 m"})
+        self.assertEqual(state.claimed_wolf_id, "p3")
+        self.assertEqual(state.claimed_wolf_seat, 3)
+
+        # "1 m" by another player must not overwrite claimed_wolf_id with non-wolf own_id
         state.apply("game:chat-public:msg", {"authorId": "p2", "msg": "1 m"})
-        self.assertEqual(state.claimed_wolf_id, "p1")
-        self.assertEqual(state.claimed_wolf_seat, 1)
+        self.assertEqual(state.claimed_wolf_id, "p3")
+        self.assertEqual(state.claimed_wolf_seat, 3)
 
     def test_wolf_claim_ww_and_seat_variants(self) -> None:
         state = make_state()
@@ -349,6 +355,126 @@ class GameStateEventTest(unittest.TestCase):
         state.messages.append({"authorId": "p3", "msg": "2 sus"})
         counts = policy._accusation_counts(state)
         self.assertEqual(counts.get("p2"), 2)
+
+    def test_started_preserves_lobby_levels_and_clears_per_game_state(self) -> None:
+        state = make_state()
+        state.apply(
+            "players-and-equipped-items",
+            {"players": [{"id": 1, "level": 42}, {"id": 2, "level": 19}]},
+        )
+        state.apply(
+            "game-started",
+            {
+                "role": {"id": "werewolf", "name": "Werewolf", "team": "WEREWOLF"},
+                "players": [
+                    {"id": 1, "username": "me"},
+                    {"id": 2, "username": "bob"},
+                ],
+            },
+        )
+        self.assertEqual(state.by_id(1).level, 42)
+        self.assertEqual(state.by_id(2).level, 19)
+        state.apply("game:chat-public:msg", {"authorId": 2, "msg": "hi"})
+        self.assertEqual(len(state.messages), 1)
+
+        # Second game in same room without a role object: previous role/chat must not leak.
+        state.apply(
+            "game-started",
+            {
+                "players": [
+                    {"id": 1, "username": "me"},
+                    {"id": 2, "username": "bob"},
+                ],
+            },
+        )
+        self.assertEqual(state.messages, [])
+        self.assertEqual(state.role_id, "")
+        self.assertEqual(state.role_name, "")
+        self.assertEqual(state.role_team, "")
+        self.assertEqual(state.by_id(1).level, 42)
+
+    def test_player_by_seat_respects_sparse_grid_and_negative_fallback(self) -> None:
+        state = make_state()
+        # Mixed grid indices: seat 2 is empty and must NOT fall back to players[1].
+        state.apply(
+            "game-started",
+            {
+                "players": [
+                    {"id": 1, "gridIdx": 0},
+                    {"id": 2, "gridIdx": 3},
+                ]
+            },
+        )
+        self.assertEqual(state.player_by_seat(1).id, 1)
+        self.assertIsNone(state.player_by_seat(2))
+        self.assertEqual(state.player_by_seat(4).id, 2)
+
+        # All grid_idx < 0 falls back cleanly to 1-based list order.
+        state.apply("game-started", {"players": [{"id": 10}, {"id": 20}]})
+        self.assertEqual(state.player_by_seat(1).id, 10)
+        self.assertEqual(state.player_by_seat(2).id, 20)
+
+    def test_votes_clear_on_phase_start(self) -> None:
+        state = make_state()
+        state.day_votes = {1: 2}
+        state.night_votes = {1: 3}
+        state.apply("game-day-voting-started", {})
+        self.assertEqual(state.phase, "day-voting")
+        self.assertEqual(state.day_votes, {})
+        self.assertEqual(state.night_votes, {1: 3})
+
+        state.apply("game-night-started", {})
+        self.assertEqual(state.phase, "night")
+        self.assertEqual(state.night_votes, {})
+
+    def test_on_killed_dict_items_and_clears_claimed_wolf(self) -> None:
+        state = make_state()
+        state.apply(
+            "game-started",
+            {
+                "players": [
+                    {"id": 1, "gridIdx": 0, "username": "me"},
+                    {"id": 2, "gridIdx": 1, "username": "wolf"},
+                ]
+            },
+        )
+        state.set_own_id(1)
+        state.apply("game:chat-public:msg", {"authorId": 2, "msg": "2 w"})
+        self.assertEqual(state.claimed_wolf_id, 2)
+
+        state.apply("game-players-killed", {"players": [{"id": 2}]})
+        self.assertIn(2, state.dead_ids)
+        self.assertFalse(state.by_id(2).is_alive)
+        self.assertIsNone(state.claimed_wolf_id)
+        self.assertIsNone(state.claimed_wolf_seat)
+
+    def test_wolf_claim_ignores_questions_negations_and_non_wolf_own_id(self) -> None:
+        state = make_state()
+        state.apply(
+            "game-started",
+            {
+                "role": {"id": "villager"},
+                "players": [
+                    {"id": 1, "gridIdx": 0, "username": "me"},
+                    {"id": 2, "gridIdx": 1, "username": "bob"},
+                    {"id": 3, "gridIdx": 2, "username": "carl"},
+                ],
+            },
+        )
+        state.set_own_id(1)
+        state.apply("game:chat-public:msg", {"authorId": 2, "msg": "3 w?"})
+        self.assertIsNone(state.claimed_wolf_id)
+
+        state.apply("game:chat-public:msg", {"authorId": 2, "msg": "3 not w"})
+        self.assertIsNone(state.claimed_wolf_id)
+
+        state.apply("game:chat-public:msg", {"authorId": 2, "msg": "1 w"})
+        self.assertIsNone(state.claimed_wolf_id)
+
+        # When bot itself is wolf, saying its own seat claim does register.
+        state.role_id = "werewolf"
+        state.apply("game:chat-public:msg", {"authorId": 1, "msg": "1 w"})
+        self.assertEqual(state.claimed_wolf_id, 1)
 
 
 if __name__ == "__main__":

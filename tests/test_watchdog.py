@@ -76,6 +76,14 @@ class WatchdogLogRotationTest(unittest.TestCase):
             self.assertEqual(len(res), 2000)
             self.assertEqual(res[-1], "line 4999\n")
 
+    def test_touch_heartbeat_creates_missing_parent_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            nested = Path(tmp) / "missing" / "subdir"
+            bot = shell()
+            bot._state = lambda name: nested / name
+            bot._touch_heartbeat()
+            self.assertTrue((nested / "heartbeat.txt").is_file())
+
 
 if __name__ == "__main__":
     unittest.main()

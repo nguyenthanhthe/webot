@@ -136,6 +136,59 @@ class ReflexEngineTest(unittest.TestCase):
         has_gg = any(r in ["gg", "ggs", "wp", "gj all", "gg wp"] for r in responses if r)
         self.assertTrue(has_gg)
 
+    def test_removed_hardcoded_usernames_do_not_trigger_mention(self) -> None:
+        # Other accounts must not react to "botzxc" / "zxc" in chat.
+        for own_name in ("alice", ""):
+            reply = self.engine.decide_chat_response(
+                msg="hey botzxc and zxc",
+                author_id="p1",
+                state=self.state,
+                own_username=own_name,
+                now=10.0,
+            )
+            self.assertIsNone(reply)
+
+    def test_negative_grid_idx_does_not_trigger_seat_zero_mention(self) -> None:
+        self.state.players = [
+            Player(id="p1", username="Alice", is_alive=True, grid_idx=-1),
+            Player(id="p2", username="other", is_alive=True, grid_idx=-1),
+        ]
+        reply = self.engine.decide_chat_response(
+            msg="0 afk?",
+            author_id="p1",
+            state=self.state,
+            own_username="other",
+            now=10.0,
+        )
+        self.assertIsNone(reply)
+
+    def test_reset_game_clears_claim_memory_across_matches(self) -> None:
+        self.state.role_id = "aura-seer"
+        first = self.engine.decide_chat_response(
+            msg="14 role?",
+            author_id="p1",
+            state=self.state,
+            own_username="botzxc",
+            now=10.0,
+        )
+        self.assertEqual(first, "im as")
+
+        self.engine.reset_game()
+        second = self.engine.decide_chat_response(
+            msg="14 role?",
+            author_id="p1",
+            state=self.state,
+            own_username="botzxc",
+            now=35.0,  # Within 45s of first game's claim, past 20s cooldown
+        )
+        self.assertEqual(second, "im as")
+
+    def test_note_reply_updates_last_claim_time_for_w_and_ww(self) -> None:
+        self.engine.note_reply("w", now=123.0)
+        self.assertEqual(self.engine.last_claim_time, 123.0)
+        self.engine.note_reply("ww", now=456.0)
+        self.assertEqual(self.engine.last_claim_time, 456.0)
+
 
 if __name__ == "__main__":
     unittest.main()

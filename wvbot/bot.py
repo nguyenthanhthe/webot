@@ -28,6 +28,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from . import __version__
@@ -86,12 +87,15 @@ class Bot:
         cfg: Config,
         account_dir: Path | None = None,
         start_web_dashboard: bool = True,
+        hub: StreamHub | None = None,
     ):
         self.cfg = cfg
         self.account_dir = account_dir
         self.start_web_dashboard = start_web_dashboard
         self.store = StatusStore()
-        self.hub = StreamHub()
+        self._own_hub = hub if hub is not None else StreamHub()
+        self.hub = self._own_hub
+        self._hub_injected = hub is not None
         self.http = HttpClient(
             timeout=cfg.request_timeout_sec,
             max_retries=cfg.max_retries,
@@ -121,11 +125,16 @@ class Bot:
         # acts once and not on every repeated server event.
         self._acted_keys: set[str] = set()
         # The XP counters survive a restart.
-        self.history = XpHistory(self._state(cfg.state_file.replace(".json", "_history.json")))
+        hist_name = (
+            cfg.state_file[:-5] + "_history.json"
+            if cfg.state_file.endswith(".json")
+            else f"{cfg.state_file}_history.json"
+        )
+        self.history = XpHistory(self._state(hist_name))
         # When the profile was read the last time.
         self._last_profile_read = 0.0
         # Watches the game for a patch that could break the protocol.
-        self.updates = UpdateWatcher(cfg, self.http, self.auth.auth_headers())
+        self.updates = UpdateWatcher(cfg, self.http, self.auth.auth_headers)
         self._last_update_check = 0.0
         # The day the process re-executed itself the last time.  It
         # lives in the state dir: os.execv wipes the memory, and a
@@ -142,6 +151,7 @@ class Bot:
     # ------------------------------------------------------------------
     def _load_device_id(self) -> str:
         path = self._state("device_id.txt")
+        path.parent.mkdir(parents=True, exist_ok=True)
         if path.is_file():
             value = path.read_text(encoding="utf-8").strip()
             if value:
@@ -257,7 +267,9 @@ class Bot:
         heartbeat file is the difference between hung and paused.
         """
         try:
-            self._state("heartbeat.txt").write_text(f"{time.time()}\n", encoding="utf-8")
+            path = self._state("heartbeat.txt")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"{time.time()}\n", encoding="utf-8")
         except OSError as exc:
             log.warning("could not write the heartbeat: %s", exc)
 
@@ -276,6 +288,30 @@ class Bot:
         except OSError as exc:
             log.warning("could not record the restart day: %s", exc)
 
+    def _is_farm_mode(self) -> bool:
+        if getattr(self, "_in_farm", False) or getattr(self, "farm_mode", False):
+            return True
+        if getattr(self, "_hub_injected", False):
+            return True
+        own_hub = getattr(self, "_own_hub", None)
+        if own_hub is not None and getattr(self, "hub", None) is not own_hub:
+            return True
+        if not getattr(self, "start_web_dashboard", True):
+            return True
+        farm_env = os.environ.get("WV_BOT_FARM", "").strip().lower()
+        return farm_env not in ("", "0", "false", "no", "off")
+
+    @staticmethod
+    def _reexec_argv() -> list[str]:
+        orig = getattr(sys, "orig_argv", None)
+        if isinstance(orig, (list, tuple)) and len(orig) > 1:
+            return [sys.executable, *orig[1:]]
+        if sys.argv:
+            prog = Path(sys.argv[0])
+            if prog.name == "__main__.py" and prog.parent.name == "wvbot":
+                return [sys.executable, "-m", "wvbot", *sys.argv[1:]]
+        return [sys.executable, *sys.argv]
+
     def _reexec(self) -> None:
         """Replace the process with a fresh one, same command line.
 
@@ -284,18 +320,40 @@ class Bot:
         is recorded in the state dir BEFORE the exec - the fresh
         process reads it and does not restart again.  If the exec
         itself fails, the bot carries on: dying here would take the
-        farm down until the watchdog notices.
+        farm down until the watchdog notices.  In farm mode, re-exec is
+        disabled so one bot never kills sibling farm threads mid-match.
         """
         today = time.strftime("%Y-%m-%d")
         self._save_restart_day(today)
         self._last_restart_day = today
+        if self._is_farm_mode():
+            self.log_event("bot", "skipping daily restart in farm mode")
+            return
         self.log_event("bot", "daily restart - replacing the process")
         self.store.update(status="restarting")
         try:
-            os.execv(sys.executable, [sys.executable, *sys.argv])
+            os.execv(sys.executable, self._reexec_argv())
         except OSError as exc:
             self.log_event("warn", f"the daily restart failed, carrying on: {exc}")
             self.store.update(status="running")
+
+    @staticmethod
+    def _safe_int(value: Any, default: int = 0) -> int:
+        if isinstance(value, bool):
+            return default
+        try:
+            return int(value) if value is not None else default
+        except (TypeError, ValueError):
+            return default
+
+    @classmethod
+    def _room_max_players(cls, room: dict[str, Any]) -> int:
+        for key in ("maxPlayerCount", "maxPlayers", "playerLimit"):
+            if key in room:
+                val = cls._safe_int(room[key], 0)
+                if val > 0:
+                    return val
+        return 0
 
     def _pick_room(self, rooms: list[dict[str, Any]]) -> dict[str, Any] | None:
         """Choose a room, preferring the fast-rotating 8-player ones.
@@ -308,16 +366,25 @@ class Bot:
         if not rooms:
             return None
 
+        cfg_max = self._safe_int(getattr(self.cfg, "max_room_size", 0), 0)
+        available: list[dict[str, Any]] = []
+        for room in rooms:
+            count = self._safe_int(room.get("playerCount"), 0)
+            room_max = self._room_max_players(room)
+            if room_max > 0 and cfg_max > 0:
+                limit = min(room_max, cfg_max)
+            else:
+                limit = room_max or cfg_max
+            if limit > 0 and count >= limit:
+                continue
+            available.append(room)
+        rooms = available
+        if not rooms:
+            return None
+
         def is_8p_room(room: dict[str, Any]) -> bool:
-            name = GameApi._room_name(room).lower()
-            max_p = 0
-            for key in ("maxPlayerCount", "maxPlayers", "playerLimit"):
-                if key in room:
-                    try:
-                        max_p = int(room[key] or 0)
-                        break
-                    except (TypeError, ValueError):
-                        pass
+            name = GameApi.fold(GameApi._room_name(room))
+            max_p = self._room_max_players(room)
             roles = room.get("roles")
             roles_count = len(roles) if isinstance(roles, list) else 0
             if 0 < max_p <= 8:
@@ -330,7 +397,7 @@ class Bot:
 
         def is_tf_room(room: dict[str, Any]) -> bool:
             """Time Flies (TF) rooms shorten day/night timers drastically for rapid XP farming."""
-            name = GameApi._room_name(room).lower()
+            name = GameApi.fold(GameApi._room_name(room))
             if any(k in name for k in (" tf", "-tf", "(tf)", "tf ", "time flies", "timeflies", "e tf", "|tf")):
                 return True
             day_ms = room.get("dayDiscussionDurationInMs")
@@ -341,12 +408,12 @@ class Bot:
         # Prioritize instant fast-farm rooms: 'WW Say M' or 'TF' (Time Flies)
         fast_rooms = [
             r for r in rooms
-            if any(k in GameApi._room_name(r).lower() for k in ("say m", "ww say", "m only"))
+            if any(k in GameApi.fold(GameApi._room_name(r)) for k in ("say m", "ww say", "m only"))
             or is_tf_room(r)
         ]
         if fast_rooms:
             # Sort by player count descending to join rooms closest to the start threshold (8-16 players)
-            fast_rooms.sort(key=lambda r: int(r.get("playerCount") or 0), reverse=True)
+            fast_rooms.sort(key=lambda r: self._safe_int(r.get("playerCount"), 0), reverse=True)
             return fast_rooms[0]
 
         # In fast-farm mode, avoid falling back to slow casual rooms where matches drag on 10-15m
@@ -366,10 +433,7 @@ class Bot:
             value = room.get("regularXp")
             if isinstance(value, bool):
                 return 1 if value else 0
-            try:
-                return int(value or 0)
-            except (TypeError, ValueError):
-                return 0
+            return self._safe_int(value, 0)
 
         best = max(xp(room) for room in rooms)
         if best <= 0:
@@ -378,10 +442,7 @@ class Bot:
             top = [room for room in rooms if xp(room) >= best * 0.8]
 
         def size(room: dict[str, Any]) -> int:
-            try:
-                return int(room.get("playerCount") or 0)
-            except (TypeError, ValueError):
-                return 99
+            return self._safe_int(room.get("playerCount"), 99)
 
         if getattr(self.cfg, "prefer_8p_rooms", True):
             eight_p = [r for r in top if is_8p_room(r)]
@@ -402,7 +463,6 @@ class Bot:
         small = [room for room in viable if size(room) <= smallest + 3]
         return random.SystemRandom().choice(small)
 
-    # ------------------------------------------------------------------
     # ------------------------------------------------------------------
     # remote control
     # ------------------------------------------------------------------
@@ -431,7 +491,7 @@ class Bot:
         if action not in ("daily", "wheel", "lootbox"):
             return False
         try:
-            rewards = Rewards(self.cfg, self.http, self.auth.auth_headers())
+            rewards = Rewards(self.cfg, self.http, self.auth.auth_headers)
             if action == "daily":
                 self._claim_daily(rewards)
             elif action == "lootbox":
@@ -444,8 +504,9 @@ class Bot:
         return True
 
     def run(self) -> None:
+        server = None
         if self.start_web_dashboard:
-            start_dashboard(
+            server = start_dashboard(
                 self.store,
                 self.cfg.dashboard_host,
                 self.cfg.dashboard_port,
@@ -454,114 +515,125 @@ class Bot:
                 rooms=self._room_probe,
                 hub=self.hub,
             )
-        self.log_event("bot", f"bot starting (v{__version__})")
-        self.store.update(version=__version__)
-        self.history.record_session()
-        self.store.update(history=self.history.get())
         try:
-            self.auth.ensure_token()
-            self.api.auth_headers = self.auth.auth_headers
-            self.log_event("auth", "authenticated")
-            self._read_profile()
-        except Exception as exc:  # noqa: BLE001 - keep the loop alive
-            self.store.update(status="error", last_error=str(exc), errors=1)
-            self.log_event("error", f"initial auth failed: {exc}")
-
-        while not self.stop_event.is_set():
-            # The outside watchdog reads this file to tell a hung bot
-            # from a working one.
-            self._touch_heartbeat()
-            # The profile is read from time to time, also while the bot
-            # waits for a room: the account can be renamed and a new
-            # ban can appear at any moment.
-            self._refresh_profile()
-            self._check_updates()
-
-            # The server bans players that join too often.  Waiting it out
-            # is the only way back in.
-            wait = self._banned_until - time.time()
-            if wait > 0:
-                self.log_event("warn", f"banned for another {int(wait)}s")
-                self.store.update(
-                    status="banned",
-                    banned_until=time.strftime(
-                        "%H:%M:%S UTC", time.gmtime(self._banned_until)
-                    ),
-                )
-                self.stop_event.wait(min(wait + 5, 7200))
-                if self.stop_event.is_set():
-                    break
-                if time.time() < self._banned_until:
-                    continue
-                self._banned_until = 0.0
-                self.store.update(banned_until=None)
-            self._banned.clear()
-
-            # A pause from the dashboard stops everything but keeps the
-            # bot alive and reachable.
-            if self._paused.is_set():
-                self.store.update(status="paused")
-                self.stop_event.wait(2.0)
-                continue
-
-            # A long 24/7 run stays fresh when the process replaces
-            # itself once a day, between two games.
-            if self._nightly_restart_due():
-                self._reexec()
-
+            self.log_event("bot", f"bot starting (v{__version__})")
+            self.store.update(version=__version__)
+            self.history.record_session()
+            self.store.update(history=self.history.get())
             try:
-                played = self.session()
-                self._failures = 0
-                self._backoff = self.cfg.reconnect_delay_sec
-                # Human bio-break / fatigue simulator: take a natural break
-                # every N consecutive games to break robotic 24/7 signatures (bypassed in turbo_mode)
-                if played and getattr(self.cfg, "bio_break_enabled", True) and not getattr(self.cfg, "turbo_mode", False):
-                    self._consecutive_games += 1
-                    target_games = getattr(self.cfg, "bio_break_interval_games", 12)
-                    self.store.update(
-                        consecutive_games=self._consecutive_games,
-                        games_to_bio_break=max(0, target_games - self._consecutive_games),
-                    )
-                    if self._consecutive_games >= target_games:
-                        self._consecutive_games = 0
-                        break_sec = random.SystemRandom().uniform(
-                            getattr(self.cfg, "bio_break_min_sec", 120.0),
-                            getattr(self.cfg, "bio_break_max_sec", 240.0),
-                        )
-                        self.log_event("bio-break", f"taking a human bio-break ({int(break_sec)}s) after consecutive games")
-                        self.store.update(status=f"bio-break ({int(break_sec)}s)", games_to_bio_break=target_games)
-                        self.stop_event.wait(break_sec)
-                        self.store.update(status="running")
-                # Always pause between games: joining back to back is
-                # what gets the account banned.
-                delay = self._next_delay()
-                self.log_event("lobby", f"next game in {int(delay)}s")
-                self.stop_event.wait(delay)
-                # The rewards are picked up between two games, when the
-                # bot is not holding a room.
-                self._collect_rewards()
-                if not played:
-                    continue
-            except Exception as exc:  # noqa: BLE001 - the supervisor must not die
-                self._failures += 1
-                self.store.update(errors=self._failures, last_error=str(exc))
-                self.log_event("error", f"session failed: {exc}")
-                if "401" in str(exc):
-                    try:
-                        self.log_event("auth", "HTTP 401 received - forcing credential refresh")
-                        self.auth.ensure_token(force=True)
-                        self.api.auth_headers = self.auth.auth_headers
-                    except Exception as auth_exc:  # noqa: BLE001
-                        log.warning("forced token refresh failed: %s", auth_exc)
-                self.stop_event.wait(self._backoff)
-                self._backoff = min(self._backoff * 2, self.cfg.reconnect_delay_max_sec)
+                self.auth.ensure_token()
+                self.api.auth_headers = self.auth.auth_headers
+                self.log_event("auth", "authenticated")
+                self._read_profile()
+            except Exception as exc:  # noqa: BLE001 - keep the loop alive
+                self.store.update(status="error", last_error=str(exc), errors=1)
+                self.log_event("error", f"initial auth failed: {exc}")
 
-        self.log_event("bot", "bot stopped")
+            while not self.stop_event.is_set():
+                # The outside watchdog reads this file to tell a hung bot
+                # from a working one.
+                self._touch_heartbeat()
+                # The profile is read from time to time, also while the bot
+                # waits for a room: the account can be renamed and a new
+                # ban can appear at any moment.
+                self._refresh_profile()
+                self._check_updates()
+
+                # The server bans players that join too often.  Waiting it out
+                # is the only way back in.
+                wait = self._banned_until - time.time()
+                if wait > 0:
+                    self.log_event("warn", f"banned for another {int(wait)}s")
+                    self.store.update(
+                        status="banned",
+                        banned_until=time.strftime(
+                            "%H:%M:%S UTC", time.gmtime(self._banned_until)
+                        ),
+                    )
+                    self.stop_event.wait(min(wait + 5, 7200))
+                    if self.stop_event.is_set():
+                        break
+                    if time.time() < self._banned_until:
+                        continue
+                    self._banned_until = 0.0
+                    self.store.update(banned_until=None)
+                self._banned.clear()
+
+                # A pause from the dashboard stops everything but keeps the
+                # bot alive and reachable.
+                if self._paused.is_set():
+                    self.store.update(status="paused")
+                    self.stop_event.wait(2.0)
+                    continue
+
+                # A long 24/7 run stays fresh when the process replaces
+                # itself once a day, between two games.
+                if self._nightly_restart_due():
+                    self._reexec()
+
+                try:
+                    played = self.session()
+                    self._failures = 0
+                    self._backoff = self.cfg.reconnect_delay_sec
+                    # Human bio-break / fatigue simulator: take a natural break
+                    # every N consecutive games to break robotic 24/7 signatures (bypassed in turbo_mode)
+                    if played and getattr(self.cfg, "bio_break_enabled", True) and not getattr(self.cfg, "turbo_mode", False):
+                        self._consecutive_games += 1
+                        target_games = getattr(self.cfg, "bio_break_interval_games", 12)
+                        self.store.update(
+                            consecutive_games=self._consecutive_games,
+                            games_to_bio_break=max(0, target_games - self._consecutive_games),
+                        )
+                        if self._consecutive_games >= target_games:
+                            self._consecutive_games = 0
+                            break_sec = random.SystemRandom().uniform(
+                                getattr(self.cfg, "bio_break_min_sec", 120.0),
+                                getattr(self.cfg, "bio_break_max_sec", 240.0),
+                            )
+                            self.log_event("bio-break", f"taking a human bio-break ({int(break_sec)}s) after consecutive games")
+                            self.store.update(status=f"bio-break ({int(break_sec)}s)", games_to_bio_break=target_games)
+                            self.stop_event.wait(break_sec)
+                            self.store.update(status="running")
+                    if self.stop_event.is_set():
+                        break
+                    # Always pause between games: joining back to back is
+                    # what gets the account banned.
+                    delay = self._next_delay()
+                    self.log_event("lobby", f"next game in {int(delay)}s")
+                    self.stop_event.wait(delay)
+                    if self.stop_event.is_set():
+                        break
+                    # The rewards are picked up between two games, when the
+                    # bot is not holding a room.
+                    self._collect_rewards()
+                except Exception as exc:  # noqa: BLE001 - the supervisor must not die
+                    self._failures += 1
+                    self.store.update(errors=self._failures, last_error=str(exc))
+                    self.log_event("error", f"session failed: {exc}")
+                    if "401" in str(exc):
+                        try:
+                            self.log_event("auth", "HTTP 401 received - forcing credential refresh")
+                            self.auth.ensure_token(force=True)
+                            self.api.auth_headers = self.auth.auth_headers
+                        except Exception as auth_exc:  # noqa: BLE001
+                            log.warning("forced token refresh failed: %s", auth_exc)
+                    self.stop_event.wait(self._backoff)
+                    self._backoff = min(self._backoff * 2, self.cfg.reconnect_delay_max_sec)
+        finally:
+            if server is not None:
+                try:
+                    server.shutdown()
+                    server.server_close()
+                except Exception as exc:  # noqa: BLE001
+                    log.debug("dashboard shutdown failed: %s", exc)
+            self.log_event("bot", "bot stopped")
 
     # ------------------------------------------------------------------
     def session(self) -> bool:
         """Join one room and play until the game ends or we get kicked."""
         self.state.reset()
+        if hasattr(self, "reflex") and hasattr(self.reflex, "reset_game"):
+            self.reflex.reset_game()
         self._clear_actions()
         self.store.update(status="looking for room", phase="lobby", room=None)
         try:
@@ -589,6 +661,8 @@ class Bot:
 
         room = self._pick_room(rooms)
         if room is None:
+            self.log_event("lobby", f"{len(rooms)} room(s) found but none matched active filters")
+            self.store.update(status="waiting for room")
             return False
         room_id = GameApi._room_id(room)
         room_name = GameApi._room_name(room)
@@ -654,17 +728,22 @@ class Bot:
         finished = threading.Event()
         disconnected = threading.Event()
         game_over = threading.Event()
+        state_lock = threading.Lock()
         session_connected_at = time.time()
         last_event = [time.time()]
         last_heartbeat = [time.time()]
         last_game_over_time = [0.0]
         game_started_at = [0.0]
-        active_sock = [None]
+        game_seq = [0]
+        seq_at_award = [0]
+        active_sock: list[Any] = [None]
+        left_cleanly = False
 
         def _process_game_award(current_sock: Any) -> None:
-            award = self.state.last_award
+            award = dict(self.state.last_award or {})
             if not award:
                 return
+            self.state.last_award = {}
             xp = int(award.get("awardedTotalXp") or 0)
             levels = int(award.get("awardedLevels") or 0)
             stats = self.store.get()
@@ -673,19 +752,20 @@ class Bot:
                 xp_last=xp,
                 games_played=int(stats.get("games_played") or 0) + 1,
             )
-            self._read_profile()
             self.log_event("xp", f"+{xp} xp" + (f" (+{levels} levels)" if levels else ""))
             self.history.record_game(xp)
             self.store.update(history=self.history.get())
             if self.cfg.claim_double_xp and award.get("canClaimDoubleXp") and current_sock:
                 self._claim_double_xp(current_sock)
-            self.state.last_award = {}
+            self._read_profile()
 
         def handle(event: str, *args: Any) -> None:
             last_event[0] = time.time()
             if event == "game-started":
-                last_game_over_time[0] = 0.0
-                game_started_at[0] = time.time()
+                with state_lock:
+                    game_seq[0] += 1
+                    last_game_over_time[0] = 0.0
+                    game_started_at[0] = time.time()
                 self.store.update(status="playing")
             if time.time() - last_heartbeat[0] > 30.0:
                 self._touch_heartbeat()
@@ -699,6 +779,8 @@ class Bot:
             finished.set()
 
         def on_awards(*args: Any) -> None:
+            with state_lock:
+                seq_at_award[0] = game_seq[0]
             game_over.set()
             finished.set()
 
@@ -710,15 +792,32 @@ class Bot:
                 s.start()
             except Exception as exc:  # noqa: BLE001
                 self.log_event("error", f"game socket failed: {exc}")
+                try:
+                    s.close()
+                except Exception:
+                    pass
                 return False
             join_delay = getattr(self.cfg, "socket_join_delay_sec", 1.0)
             if join_delay > 0:
-                time.sleep(join_delay)
+                self.stop_event.wait(join_delay)
+                if self.stop_event.is_set():
+                    try:
+                        s.close()
+                    except Exception:
+                        pass
+                    return False
+            join_payload: dict[str, Any] = {"miniGameId": game_id}
+            room_pw = getattr(self.cfg, "room_password", "")
+            if room_pw:
+                join_payload["password"] = room_pw
             try:
-                s.emit("mg:join-open-game", {"miniGameId": game_id})
+                s.emit("mg:join-open-game", join_payload)
             except Exception as exc:  # noqa: BLE001
                 self.log_event("error", f"the join request failed: {exc}")
-                s.close()
+                try:
+                    s.close()
+                except Exception:
+                    pass
                 return False
             return True
 
@@ -739,16 +838,32 @@ class Bot:
         while not self.stop_event.is_set():
             if finished.wait(timeout=1.0):
                 if game_over.is_set():
-                    _process_game_award(active_sock[0])
-                    start_time = game_started_at[0] if game_started_at[0] > 0 else session_connected_at
+                    with state_lock:
+                        award_seq = seq_at_award[0]
+                        rematch_started = game_seq[0] != award_seq
+                        start_time = (
+                            game_started_at[0]
+                            if (not rematch_started and game_started_at[0] > 0)
+                            else session_connected_at
+                        )
                     duration = max(0.0, time.time() - start_time)
                     stay_max = getattr(self.cfg, "stay_in_room_max_game_duration_sec", 150.0)
-                    if getattr(self.cfg, "stay_in_room", False) and duration <= stay_max:
-                        game_over.clear()
-                        finished.clear()
-                        self._clear_actions()
-                        self.state.phase = "lobby"
-                        self.store.update(status="staying in room", phase="lobby")
+                    will_stay = bool(
+                        getattr(self.cfg, "stay_in_room", False)
+                        and (rematch_started or duration <= stay_max)
+                    )
+                    if will_stay:
+                        with state_lock:
+                            game_over.clear()
+                            finished.clear()
+                            if game_seq[0] == award_seq:
+                                self._clear_actions()
+                                self.state.phase = "lobby"
+                                self.store.update(status="staying in room", phase="lobby")
+                                last_event[0] = time.time()
+                                last_game_over_time[0] = time.time()
+                                game_started_at[0] = 0.0
+                        _process_game_award(active_sock[0])
                         room_label = (
                             (self.store.get().get("room") or game_id)
                             if hasattr(self, "store")
@@ -756,11 +871,9 @@ class Bot:
                         )
                         dur_text = f" trong {int(duration)}s (nhanh)" if duration > 0 else ""
                         self.log_event("lobby", f"cắm phòng '{room_label}': ván xong{dur_text}, giữ nguyên kết nối chờ ván tiếp...")
-                        last_event[0] = time.time()
-                        last_game_over_time[0] = time.time()
-                        game_started_at[0] = 0.0
                         continue
                     else:
+                        _process_game_award(active_sock[0])
                         room_label = (
                             (self.store.get().get("room") or game_id)
                             if hasattr(self, "store")
@@ -768,6 +881,7 @@ class Bot:
                         )
                         if duration > stay_max:
                             self.log_event("lobby", f"phòng '{room_label}' chậm (ván kéo dài {int(duration)}s > {int(stay_max)}s) - rời phòng tìm phòng TF/fast farm khác")
+                        left_cleanly = True
                         break
 
                 if (
@@ -776,10 +890,13 @@ class Bot:
                     and not self._banned.is_set()
                 ):
                     disconnected.clear()
-                    if (
+                    rejoined = False
+                    while (
                         reconnect_attempts < max_reconnects
                         and not self.stop_event.is_set()
                         and not self._restart.is_set()
+                        and not self._session_over.is_set()
+                        and not self._banned.is_set()
                     ):
                         reconnect_attempts += 1
                         self.log_event(
@@ -787,18 +904,19 @@ class Bot:
                             f"socket disconnected mid-game - fast rejoin attempt "
                             f"{reconnect_attempts}/{max_reconnects} to room {game_id}",
                         )
-                        self.store.update(status="reconnecting")
                         self.store.update(
-                            reconnects=int(self.store.get().get("reconnects") or 0) + 1
+                            status="reconnecting",
+                            reconnects=int(self.store.get().get("reconnects") or 0) + 1,
                         )
                         try:
                             if active_sock[0]:
                                 active_sock[0].close()
                         except Exception:
                             pass
+                        active_sock[0] = None
 
                         self.stop_event.wait(reconnect_delay)
-                        if self.stop_event.is_set():
+                        if self.stop_event.is_set() or self._restart.is_set():
                             break
 
                         finished.clear()
@@ -814,22 +932,23 @@ class Bot:
                             last_event[0] = time.time()
                             self.store.update(status="playing")
                             self.log_event("game", f"fast rejoin connected for room {game_id}")
-                            continue
-                        else:
-                            self.log_event(
-                                "warn",
-                                f"fast rejoin setup failed on attempt {reconnect_attempts}",
-                            )
-                            if reconnect_attempts >= max_reconnects:
-                                break
-                            continue
-                    else:
+                            rejoined = True
+                            break
+                        self.log_event(
+                            "warn",
+                            f"fast rejoin setup failed on attempt {reconnect_attempts}",
+                        )
+                        active_sock[0] = None
+                    if rejoined:
+                        continue
+                    if not self.stop_event.is_set() and not self._restart.is_set():
                         self.log_event("warn", "fast reconnect exhausted or disabled - leaving room")
-                        break
+                    break
 
             if self.stop_event.is_set() or self._restart.is_set():
                 self._restart.clear()
                 self.log_event("bot", "stop or restart request - leaving the room properly")
+                left_cleanly = True
                 break
             if self._banned.is_set():
                 break
@@ -847,6 +966,7 @@ class Bot:
                         else game_id
                     )
                     self.log_event("lobby", f"phòng '{room_label}' không bắt đầu ván mới sau {int(stay_timeout)}s - rời phòng tìm phòng khác")
+                    left_cleanly = True
                     break
             if time.time() - last_event[0] > self.cfg.silence_timeout_sec:
                 self.log_event("warn", "no server event for a long time - restarting the game")
@@ -867,8 +987,12 @@ class Bot:
         if active_sock[0]:
             active_sock[0].close()
 
-        self.store.update(status="reconnecting")
-        self.store.update(reconnects=int(self.store.get().get("reconnects") or 0) + 1)
+        if self.stop_event.is_set():
+            self.store.update(status="stopped")
+        elif left_cleanly:
+            self.store.update(status="waiting for room")
+        else:
+            self.store.update(status="reconnecting")
         return True
 
     def _claim_double_xp(self, sock: SocketIOClient) -> None:
@@ -890,6 +1014,9 @@ class Bot:
         payload = args[0] if args else None
         if event == "game-started":
             self.state.apply(event, payload)
+            if hasattr(self, "reflex") and hasattr(self.reflex, "reset_game"):
+                self.reflex.reset_game()
+            self._clear_actions()
             self._find_own_id()
             self.store.update(
                 role=self.state.role_name or self.state.role_id,
@@ -918,7 +1045,7 @@ class Bot:
         elif event in ("game-day-voting-started", "game-day-started"):
             self.state.apply(event, payload)
             self.store.update(phase=self.state.phase)
-            self._clear_actions()
+            self._clear_actions(keep=("wolf-self-claim",))
             self._wolf_self_claim(sock)
             if event == "game-day-voting-started":
                 self._day_vote(sock)
@@ -966,9 +1093,6 @@ class Bot:
                 pass
             self.state.apply(event, payload)
             self.store.update(phase="game-over")
-            award = self.state.last_award
-            if self.cfg.claim_double_xp and award.get("canClaimDoubleXp"):
-                self._claim_double_xp(sock)
             if getattr(self.cfg, "reflex_chat_enabled", True):
                 self._handle_game_over_reflex(sock)
         elif event == "error-user-banned":
@@ -1008,15 +1132,19 @@ class Bot:
         The daily reward is free, so it is claimed.  The golden wheel
         costs roses and only spins when the config says so.
         """
-        if not self.cfg.claim_daily_rewards and not self.cfg.spin_golden_wheel:
+        want_daily = bool(getattr(self.cfg, "claim_daily_rewards", False))
+        want_wheel = bool(getattr(self.cfg, "spin_golden_wheel", False))
+        want_boxes = bool(getattr(self.cfg, "open_loot_boxes", False))
+        if not (want_daily or want_wheel or want_boxes):
             return
         try:
-            rewards = Rewards(self.cfg, self.http, self.auth.auth_headers())
-            if self.cfg.claim_daily_rewards:
+            rewards = Rewards(self.cfg, self.http, self.auth.auth_headers)
+            if want_daily:
                 self._claim_daily(rewards)
-            if self.cfg.spin_golden_wheel:
+            if want_wheel:
                 self._spin_wheel(rewards)
-            self._open_loot_boxes(rewards)
+            if want_boxes:
+                self._open_loot_boxes(rewards)
         except Exception as exc:  # noqa: BLE001 - a reward must not stop the bot
             self.log_event("warn", f"the rewards failed: {exc}")
 
@@ -1059,15 +1187,16 @@ class Bot:
         kind = str(due[0].get("type") or "reward")
         amount = due[0].get("amount")
         # One attempt per day per rung: a rung the server keeps
-        # refusing must not be posted again on every round.
+        # refusing must not be posted again on every round, while
+        # transient request errors remain retryable.
         if self._daily_claim_attempted(kind):
             return
-        self._note_daily_claim_attempt(kind)
         try:
             result = rewards.claim_daily_reward()
         except Exception as exc:  # noqa: BLE001
             self.log_event("warn", f"the daily reward failed: {exc}")
             return
+        self._note_daily_claim_attempt(kind)
         # The answer decides what gets logged: a claim the server
         # refused must not read as a success.
         detail = json.dumps(result)[:200] if result else "server answered nothing"
@@ -1113,8 +1242,19 @@ class Bot:
 
     def _spin_wheel(self, rewards: Rewards) -> None:
         conditions = rewards.golden_wheel_conditions()
-        cost = int(conditions.get("costInRoses") or 0)
-        if cost > self.cfg.wheel_max_roses:
+        if (
+            not isinstance(conditions, dict)
+            or "costInRoses" not in conditions
+            or conditions["costInRoses"] is None
+        ):
+            self.log_event("warn", "golden wheel conditions missing costInRoses - not spinning")
+            return
+        try:
+            cost = int(conditions["costInRoses"])
+        except (TypeError, ValueError):
+            self.log_event("warn", f"invalid golden wheel cost {conditions['costInRoses']!r} - not spinning")
+            return
+        if cost < 0 or cost > self.cfg.wheel_max_roses:
             self.log_event(
                 "reward",
                 f"the wheel costs {cost} roses - over the limit, not spinning",
@@ -1364,8 +1504,18 @@ class Bot:
         except Exception as exc:  # noqa: BLE001 - an action must not kill anything
             self.log_event("warn", f"{name} failed: {exc}")
 
+    def _own_is_alive(self) -> bool:
+        own_id = self.state.own_id() if hasattr(self.state, "own_id") else None
+        if own_id is not None and own_id in getattr(self.state, "dead_ids", ()):
+            return False
+        if hasattr(self.state, "by_id") and own_id is not None:
+            own = self.state.by_id(own_id)
+            if own is not None and not getattr(own, "is_alive", True):
+                return False
+        return True
+
     def _night_action(self, sock: SocketIOClient) -> None:
-        if not self.state.is_wolf:
+        if not self._own_is_alive() or not self.state.is_wolf:
             return
         if self._acted("werewolf-vote"):
             return
@@ -1375,6 +1525,8 @@ class Bot:
             return
 
         def vote() -> None:
+            if not self._own_is_alive():
+                return
             sock.emit("game-werewolves-vote-set", json.dumps({"targetPlayerId": target}))
             self.log_event("action", f"werewolf vote -> {target}")
 
@@ -1384,12 +1536,8 @@ class Bot:
         """In vill-win rooms, if the bot is wolf, immediately claim seat number in chat."""
         if not getattr(self.cfg, "vill_win_mode", True) or not getattr(self.cfg, "wolf_self_claim", True):
             return
-        if not self.state.is_wolf:
+        if not self.state.is_wolf or not self._own_is_alive():
             return
-        if hasattr(self.state, "by_id"):
-            own = self.state.by_id(self.state.own_id())
-            if own and not getattr(own, "is_alive", True):
-                return
         if self._acted("wolf-self-claim"):
             return
         seat = self.state.own_seat()
@@ -1398,13 +1546,15 @@ class Bot:
         self.state.claimed_wolf_id = self.state.own_id()
         self.state.claimed_wolf_seat = seat
         store = getattr(self, "store", None)
-        room_name = (store.get().get("room") or "").lower() if store else ""
+        room_name = GameApi.fold(store.get().get("room") or "") if store else ""
         if any(k in room_name for k in ("say m", "ww say", "m only")):
             claim_msg = "m"
         else:
             claim_msg = f"{seat} w"
 
         def speak() -> None:
+            if not self._own_is_alive():
+                return
             self.chat(sock, claim_msg)
             self.log_event("chat", f"vill-win wolf claim: {claim_msg}")
 
@@ -1424,17 +1574,24 @@ class Bot:
         self._acted_keys.add(key)
         return False
 
-    def _clear_actions(self) -> None:
+    def _clear_actions(self, keep: tuple[str, ...] = ()) -> None:
         if hasattr(self, "_acted_keys"):
-            self._acted_keys.clear()
+            if keep:
+                self._acted_keys.intersection_update(keep)
+            else:
+                self._acted_keys.clear()
 
     def _day_vote(self, sock: SocketIOClient, immediate: bool = False) -> None:
-        if hasattr(self.state, "by_id"):
-            own = self.state.by_id(self.state.own_id())
-            if own and not getattr(own, "is_alive", True):
-                return
+        if getattr(self.state, "phase", "") != "day-voting":
+            return
+        if not self._own_is_alive():
+            return
 
         def do_vote() -> None:
+            if getattr(self.state, "phase", "") != "day-voting":
+                return
+            if not self._own_is_alive():
+                return
             # Re-evaluate vote target right before emitting
             target = self.policy.vote_target(self.state)
             current_vote = self.state.day_votes.get(self.state.own_id())
@@ -1449,7 +1606,10 @@ class Bot:
                 self.log_event("action", "day vote: skip")
 
         if immediate:
-            do_vote()
+            try:
+                do_vote()
+            except Exception as exc:  # noqa: BLE001 - never crash sio-reader thread
+                self.log_event("warn", f"day vote failed: {exc}")
             return
 
         if self._acted("day-vote"):
@@ -1464,6 +1624,8 @@ class Bot:
             self._queue_action("day vote skip fallback", delay, delay + 2.0, do_vote)
 
     def _killer_action(self, sock: SocketIOClient, instant: bool = False) -> None:
+        if not self._own_is_alive():
+            return
         event = KILLER_ROLES.get(self.state.role_id.lower())
         if not event or self._acted(event):
             return
@@ -1481,6 +1643,8 @@ class Bot:
             return
 
         def kill() -> None:
+            if not self._own_is_alive():
+                return
             sock.emit(event, json.dumps({"targetPlayerId": target}))
             self.log_event("action", f"{event} -> {target}")
 
@@ -1493,6 +1657,8 @@ class Bot:
 
     def _protector_action(self, sock: SocketIOClient) -> None:
         """The doctor and the bodyguard pick somebody to protect."""
+        if not self._own_is_alive():
+            return
         event = PROTECTOR_ROLES.get(self.state.role_id.lower())
         if not event or self._acted(event):
             return
@@ -1501,6 +1667,8 @@ class Bot:
             return
 
         def protect() -> None:
+            if not self._own_is_alive():
+                return
             sock.emit(event, json.dumps({"targetPlayerId": target}))
             self.log_event("action", f"{event} -> {target}")
 
@@ -1508,6 +1676,8 @@ class Bot:
 
     def _reviver_action(self, sock: SocketIOClient) -> None:
         """The medium revives a fallen villager."""
+        if not self._own_is_alive():
+            return
         event = REVIVER_ROLES.get(self.state.role_id.lower())
         if not event or self._acted(event):
             return
@@ -1516,6 +1686,8 @@ class Bot:
             return
 
         def revive() -> None:
+            if not self._own_is_alive():
+                return
             sock.emit(event, json.dumps({"targetPlayerId": target}))
             self.log_event("action", f"{event} -> {target}")
 
@@ -1523,6 +1695,8 @@ class Bot:
 
     def _investigator_action(self, sock: SocketIOClient) -> None:
         """The seer, aura seer, or detective reveals a player."""
+        if not self._own_is_alive():
+            return
         event = INVESTIGATOR_ROLES.get(self.state.role_id.lower())
         if not event or self._acted(event):
             return
@@ -1531,6 +1705,8 @@ class Bot:
             return
 
         def reveal() -> None:
+            if not self._own_is_alive():
+                return
             sock.emit(event, json.dumps({"targetPlayerId": target}))
             self.log_event("action", f"{event} -> {target}")
 
@@ -1595,8 +1771,8 @@ class Bot:
 
 
 def _day_key_now() -> str:
-    """The local day, used for the once-a-day claim marker."""
-    return time.strftime("%Y-%m-%d")
+    """The UTC day, used for the once-a-day claim marker."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
 def _parse_ban_until(value: str) -> float:
@@ -1609,34 +1785,9 @@ def _parse_ban_until(value: str) -> float:
     if not text:
         return 0.0
     try:
-        from datetime import datetime, timezone
-
         stamp = datetime.fromisoformat(text.replace("Z", "+00:00"))
         if stamp.tzinfo is None:
             stamp = stamp.replace(tzinfo=timezone.utc)
         return stamp.timestamp()
     except Exception:  # noqa: BLE001 - advisory only
         return 0.0
-
-
-def _extract_game_info(data: Any) -> dict[str, Any]:
-    if not isinstance(data, dict):
-        return {}
-    info: dict[str, Any] = {}
-    for key in ("gameId", "id"):
-        if key in data and data[key] is not None:
-            info["gameId"] = data[key]
-            break
-    for key in ("serverUrl", "server", "url"):
-        if key in data and isinstance(data[key], str):
-            info["serverUrl"] = data[key]
-            break
-
-    values = list(data.values())
-    if "gameId" not in info and values:
-        info["gameId"] = values[0]
-    if "serverUrl" not in info and len(values) > 1:
-        candidate = values[1]
-        if isinstance(candidate, str) and candidate.startswith("http"):
-            info["serverUrl"] = candidate
-    return info

@@ -6,6 +6,8 @@ state directory.  Only the attributes a helper touches are attached.
 
 from __future__ import annotations
 
+import os
+import sys
 import tempfile
 import threading
 import time
@@ -23,7 +25,6 @@ from wvbot.bot import (
     PROTECTOR_ROLES,
     REVIVER_ROLES,
     Bot,
-    _extract_game_info,
     _parse_ban_until,
 )
 from wvbot.dashboard import StatusStore
@@ -58,23 +59,6 @@ class ParseBanUntilTest(unittest.TestCase):
         bot = shell(store=StatusStore(), stop_event=threading.Event())
         bot._banned_until = future
         self.assertTrue(time.time() < bot._banned_until)
-
-
-class ExtractGameInfoTest(unittest.TestCase):
-    def test_named_fields(self) -> None:
-        info = _extract_game_info({"gameId": "g1", "serverUrl": "https://s.example"})
-        self.assertEqual(info["gameId"], "g1")
-        self.assertEqual(info["serverUrl"], "https://s.example")
-
-    def test_id_alias(self) -> None:
-        self.assertEqual(_extract_game_info({"id": 7})["gameId"], 7)
-
-    def test_empty_dict_gives_empty_info(self) -> None:
-        self.assertEqual(_extract_game_info({}), {})
-
-    def test_non_dict_gives_empty_info(self) -> None:
-        self.assertEqual(_extract_game_info(["nope"]), {})
-        self.assertEqual(_extract_game_info(None), {})
 
 
 class RoleTablesTest(unittest.TestCase):
@@ -439,6 +423,7 @@ class QueuedActionTest(unittest.TestCase):
 
         state = GameState()
         state.apply("game-started", {"players": [{"id": 1}, {"id": 2}]})
+        state.apply("game-day-voting-started", {})
         return shell(
             cfg=types.SimpleNamespace(),
             state=state,
@@ -1338,6 +1323,524 @@ class TurboVillWinFarmTest(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         emitted_events = [e[0] for e in sockets[0].emitted]
         self.assertIn("mg:exit-game", emitted_events)
+
+
+class BotInitAndLifecycleTest(unittest.TestCase):
+    def test_init_accepts_hub_creates_state_dir_and_non_json_history(self) -> None:
+        from wvbot.stream import StreamHub
+
+        with tempfile.TemporaryDirectory() as tmp:
+            nested = Path(tmp) / "nested" / "state"
+            cfg = config_module.Config(state_file="custom_state")
+            hub = StreamHub()
+            with mock.patch.object(config_module, "STATE_DIR", nested):
+                with mock.patch.object(bot_module, "UpdateWatcher") as mock_updates:
+                    bot = Bot(cfg, start_web_dashboard=False, hub=hub)
+
+            self.assertIs(bot.hub, hub)
+            self.assertTrue((nested / "device_id.txt").is_file())
+            self.assertEqual(bot.history.path.name, "custom_state_history.json")
+            self.assertEqual(mock_updates.call_count, 1)
+            self.assertTrue(callable(mock_updates.call_args[0][2]))
+            self.assertEqual(mock_updates.call_args[0][2], bot.auth.auth_headers)
+
+    def test_run_shuts_down_dashboard_in_finally_and_skips_rewards_on_stop(self) -> None:
+        server = mock.MagicMock()
+        bot = shell(
+            cfg=types.SimpleNamespace(
+                dashboard_host="127.0.0.1",
+                dashboard_port=0,
+                reconnect_delay_sec=1.0,
+                reconnect_delay_max_sec=5.0,
+                bio_break_enabled=False,
+                turbo_mode=True,
+            ),
+            start_web_dashboard=True,
+            store=StatusStore(),
+            hub=None,
+            history=types.SimpleNamespace(record_session=lambda: None, get=lambda: {}),
+            auth=types.SimpleNamespace(ensure_token=lambda force=False: "tok", auth_headers=lambda: {}),
+            api=types.SimpleNamespace(auth_headers=lambda: {}),
+            stop_event=threading.Event(),
+            _banned_until=0.0,
+            _banned=threading.Event(),
+            _paused=threading.Event(),
+            _consecutive_games=0,
+            _backoff=1.0,
+            _failures=0,
+        )
+        bot.log_event = lambda *a, **k: None
+        bot._read_profile = lambda: None
+        bot._touch_heartbeat = lambda: None
+        bot._refresh_profile = lambda: None
+        bot._check_updates = lambda: None
+        bot._nightly_restart_due = lambda: False
+        bot._next_delay = lambda: 0.0
+        reward_calls = []
+        bot._collect_rewards = lambda: reward_calls.append(True)
+
+        def stop_in_session() -> bool:
+            bot.stop_event.set()
+            return True
+
+        bot.session = stop_in_session
+
+        with mock.patch.object(bot_module, "start_dashboard", return_value=server):
+            bot.run()
+
+        server.shutdown.assert_called_once_with()
+        server.server_close.assert_called_once_with()
+        self.assertEqual(reward_calls, [])
+
+
+class StayInRoomRaceAndDoubleXpTest(unittest.TestCase):
+    def test_stay_in_room_does_not_clobber_fast_rematch(self) -> None:
+        from wvbot.game import GameState
+
+        cfg = types.SimpleNamespace(
+            fast_reconnect_enabled=False,
+            socket_join_delay_sec=0.0,
+            silence_timeout_sec=300.0,
+            claim_double_xp=False,
+            stay_in_room=True,
+            stay_in_room_timeout_sec=0.25,
+            stay_in_room_max_game_duration_sec=150.0,
+            reflex_chat_enabled=False,
+            vill_win_mode=False,
+            wolf_self_claim=False,
+            instant_kill=False,
+        )
+        store = StatusStore()
+        bot = shell(
+            cfg=cfg,
+            store=store,
+            stop_event=threading.Event(),
+            _restart=threading.Event(),
+            _banned=threading.Event(),
+            _session_over=threading.Event(),
+            _acted_keys=set(),
+            state=GameState(),
+            auth=types.SimpleNamespace(ensure_token=lambda: "tok"),
+            device_id="dev",
+            history=types.SimpleNamespace(record_game=lambda xp: None, get=lambda: {}),
+        )
+        bot.log_event = lambda *a, **k: None
+        bot._update_alive = lambda: None
+        bot._maybe_chat = lambda *a: None
+        bot._night_action = lambda *a: None
+        bot._killer_action = lambda *a, **k: None
+        bot._protector_action = lambda *a: None
+        bot._reviver_action = lambda *a: None
+        bot._investigator_action = lambda *a: None
+
+        sockets: list[FakeGameSocket] = []
+        bot._create_game_socket = lambda token, url: (sockets.append(FakeGameSocket()) or sockets[-1])
+
+        read_count = [0]
+        saw_game2_started = threading.Event()
+
+        def racy_read_profile() -> None:
+            read_count[0] += 1
+            if read_count[0] == 1:
+                sockets[0].simulate_event(
+                    "game-started",
+                    {"role": {"id": "villager"}, "players": [{"id": 1}]},
+                )
+                bot._acted_keys.add("rematch-action")
+                saw_game2_started.set()
+
+        bot._read_profile = racy_read_profile
+
+        thread = threading.Thread(
+            target=lambda: bot._play_game("tok", "room-1", "http://server"),
+            daemon=True,
+        )
+        thread.start()
+
+        for _ in range(50):
+            if sockets and sockets[0].emitted:
+                break
+            time.sleep(0.01)
+
+        sockets[0].simulate_event(
+            "game-over-awards-available",
+            {"playerAward": {"awardedTotalXp": 90}},
+        )
+        self.assertTrue(saw_game2_started.wait(timeout=2.0))
+        time.sleep(0.05)
+
+        # Game #2's state must survive _process_game_award finishing Game #1.
+        self.assertEqual(bot.state.phase, "started")
+        self.assertEqual(store.get().get("status"), "playing")
+        self.assertIn("rematch-action", bot._acted_keys)
+
+        # Finish Game #2 cleanly and verify stay_in_room timeout exits the room.
+        sockets[0].simulate_event(
+            "game-over-awards-available",
+            {"playerAward": {"awardedTotalXp": 40}},
+        )
+        thread.join(timeout=3.0)
+        self.assertFalse(thread.is_alive())
+
+    def test_double_xp_claimed_once_and_clean_exit_keeps_reconnects_zero(self) -> None:
+        from wvbot.game import GameState
+
+        cfg = types.SimpleNamespace(
+            fast_reconnect_enabled=False,
+            socket_join_delay_sec=0.0,
+            silence_timeout_sec=300.0,
+            claim_double_xp=True,
+            stay_in_room=False,
+            stay_in_room_max_game_duration_sec=150.0,
+            reflex_chat_enabled=False,
+        )
+        store = StatusStore()
+        bot = shell(
+            cfg=cfg,
+            store=store,
+            stop_event=threading.Event(),
+            _restart=threading.Event(),
+            _banned=threading.Event(),
+            _session_over=threading.Event(),
+            state=GameState(),
+            auth=types.SimpleNamespace(ensure_token=lambda: "tok"),
+            device_id="dev",
+            history=types.SimpleNamespace(record_game=lambda xp: None, get=lambda: {}),
+        )
+        bot.log_event = lambda *a, **k: None
+        bot._read_profile = lambda: None
+        sockets: list[FakeGameSocket] = []
+        bot._create_game_socket = lambda token, url: (sockets.append(FakeGameSocket()) or sockets[-1])
+
+        thread = threading.Thread(target=lambda: bot._play_game("tok", "room-1", "http://server"))
+        thread.start()
+
+        for _ in range(50):
+            if sockets and sockets[0].emitted:
+                break
+            time.sleep(0.01)
+
+        sockets[0].simulate_event(
+            "game-over-awards-available",
+            {"playerAward": {"awardedTotalXp": 50, "canClaimDoubleXp": True}},
+        )
+        thread.join(timeout=2.0)
+        self.assertFalse(thread.is_alive())
+
+        double_xp_emits = [e for e in sockets[0].emitted if e[0] == "game-over-double-xp"]
+        self.assertEqual(len(double_xp_emits), 1)
+        self.assertEqual(int(store.get().get("reconnects") or 0), 0)
+
+
+class MultiAttemptFastReconnectAndPasswordTest(unittest.TestCase):
+    def test_multi_attempt_fast_reconnect_succeeds_after_initial_setup_failure(self) -> None:
+        from wvbot.game import GameState
+
+        cfg = types.SimpleNamespace(
+            fast_reconnect_enabled=True,
+            fast_reconnect_max_attempts=3,
+            fast_reconnect_delay_sec=0.01,
+            socket_join_delay_sec=0.0,
+            silence_timeout_sec=300.0,
+            claim_double_xp=False,
+            room_password="pw123",
+        )
+        store = StatusStore()
+        bot = shell(
+            cfg=cfg,
+            store=store,
+            stop_event=threading.Event(),
+            _restart=threading.Event(),
+            _banned=threading.Event(),
+            _session_over=threading.Event(),
+            state=GameState(),
+            auth=types.SimpleNamespace(ensure_token=lambda: "tok"),
+            device_id="dev",
+            history=types.SimpleNamespace(record_game=lambda xp: None, get=lambda: {}),
+        )
+        bot.log_event = lambda *a, **k: None
+        bot._read_profile = lambda: None
+
+        created: list[FakeGameSocket] = []
+
+        def create_sock(token, url):
+            # Socket 0 connects, Socket 1 fails start(), Socket 2 succeeds immediately.
+            s = FakeGameSocket(start_fails=(len(created) == 1))
+            created.append(s)
+            return s
+
+        bot._create_game_socket = create_sock
+        results = []
+        thread = threading.Thread(
+            target=lambda: results.append(bot._play_game("tok", "room-9", "http://server"))
+        )
+        thread.start()
+
+        for _ in range(50):
+            if created and created[0].emitted:
+                break
+            time.sleep(0.01)
+
+        self.assertEqual(created[0].emitted[0], ("mg:join-open-game", ({"miniGameId": "room-9", "password": "pw123"},)))
+        created[0].simulate_event("disconnect")
+
+        for _ in range(100):
+            if len(created) >= 3 and created[2].emitted:
+                break
+            time.sleep(0.01)
+
+        self.assertEqual(len(created), 3)
+        self.assertTrue(created[1].closed)
+        self.assertEqual(int(store.get().get("reconnects") or 0), 2)
+
+        created[2].simulate_event("game-over-awards-available", {"playerAward": {"awardedTotalXp": 30}})
+        thread.join(timeout=2.0)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(results, [True])
+
+
+class ImmediateVoteSafetyAndPhaseTest(unittest.TestCase):
+    def _bot(self, phase: str) -> Bot:
+        from wvbot.game import GameState, Policy
+
+        state = GameState()
+        state.apply(
+            "game-started",
+            {"players": [{"id": 1, "gridIdx": 0}, {"id": 2, "gridIdx": 1}]},
+        )
+        state.set_own_id(1)
+        state.phase = phase
+        state.messages.append({"authorId": 1, "msg": "vote 2"})
+        return shell(
+            cfg=types.SimpleNamespace(turbo_mode=True),
+            state=state,
+            policy=Policy(),
+            store=StatusStore(),
+            _acted_keys=set(),
+            stop_event=threading.Event(),
+            log_event=mock.MagicMock(),
+            _queue_action=lambda name, low, high, act: act(),
+        )
+
+    def test_immediate_vote_catches_socket_emit_error(self) -> None:
+        bot = self._bot("day-voting")
+        sock = mock.MagicMock()
+        sock.emit.side_effect = OSError("socket closed")
+        bot._day_vote(sock, immediate=True)
+        bot.log_event.assert_called()
+
+    def test_out_of_phase_blocks_immediate_and_queued_votes(self) -> None:
+        for bad_phase in ("started", "night", "lobby"):
+            bot = self._bot(bad_phase)
+            sock = mock.MagicMock()
+            bot._day_vote(sock, immediate=True)
+            bot._day_vote(sock, immediate=False)
+            sock.emit.assert_not_called()
+
+
+class ReexecAndFarmModeTest(unittest.TestCase):
+    def test_reexec_disabled_in_farm_mode_variants(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(config_module, "STATE_DIR", Path(tmp)):
+                # Variant 1: injected hub
+                b1 = shell(store=StatusStore(), _hub_injected=True, log_event=mock.MagicMock())
+                # Variant 2: start_web_dashboard=False (farm child bot)
+                b2 = shell(store=StatusStore(), start_web_dashboard=False, log_event=mock.MagicMock())
+                # Variant 3: WV_BOT_FARM env var
+                b3 = shell(store=StatusStore(), log_event=mock.MagicMock())
+
+                with mock.patch.object(bot_module.os, "execv") as execv_mock:
+                    b1._reexec()
+                    b2._reexec()
+                    with mock.patch.dict(os.environ, {"WV_BOT_FARM": "1"}):
+                        b3._reexec()
+                    execv_mock.assert_not_called()
+
+    def test_reexec_argv_supports_module_invocation(self) -> None:
+        with mock.patch.object(sys, "orig_argv", [sys.executable, "-m", "wvbot", "--fast"], create=True):
+            self.assertEqual(Bot._reexec_argv(), [sys.executable, "-m", "wvbot", "--fast"])
+
+        with mock.patch.object(sys, "orig_argv", [], create=True):
+            with mock.patch.object(sys, "argv", ["C:/repo/wvbot/__main__.py", "--flag"]):
+                self.assertEqual(Bot._reexec_argv(), [sys.executable, "-m", "wvbot", "--flag"])
+
+
+class WolfSelfClaimDay1AndDeadGuardTest(unittest.TestCase):
+    def test_wolf_self_claim_fires_once_on_day1_and_resets_next_night(self) -> None:
+        from wvbot.game import GameState, Policy
+
+        state = GameState()
+        state.set_own_id("w1")
+        cfg = types.SimpleNamespace(
+            vill_win_mode=True,
+            wolf_self_claim=True,
+            turbo_mode=True,
+            instant_kill=False,
+            reflex_chat_enabled=False,
+            chat_enabled=True,
+        )
+        bot = shell(
+            cfg=cfg,
+            state=state,
+            policy=Policy(cfg),
+            store=StatusStore(),
+            _acted_keys=set(),
+            stop_event=threading.Event(),
+            _queue_action=lambda name, low, high, act: act(),
+        )
+        bot.store.update(room="WW Say M (E)")
+        bot.log_event = lambda *a, **k: None
+        bot._find_own_id = lambda: state.set_own_id("w1")
+        bot._update_alive = lambda: None
+        bot._player_levels = lambda: []
+        bot._maybe_chat = lambda *a: None
+        bot._night_action = lambda *a: None
+        bot._killer_action = lambda *a, **k: None
+        bot._protector_action = lambda *a: None
+        bot._reviver_action = lambda *a: None
+        bot._investigator_action = lambda *a: None
+        sock = FakeGameSocket()
+
+        bot._on_game_event(
+            sock,
+            "game-started",
+            ({"role": {"id": "werewolf"}, "players": [{"id": "w1", "gridIdx": 0}, {"id": "v1", "gridIdx": 1}]},),
+        )
+        bot._on_game_event(sock, "game-day-started", ())
+        bot._on_game_event(sock, "game-day-voting-started", ())
+        self.assertEqual(len([e for e in sock.emitted if e[0] == "game:chat-public:msg"]), 1)
+
+        bot._on_game_event(sock, "game-night-started", ())
+        bot._on_game_event(sock, "game-day-started", ())
+        self.assertEqual(len([e for e in sock.emitted if e[0] == "game:chat-public:msg"]), 2)
+
+    def test_dead_bot_blocks_all_active_role_actions(self) -> None:
+        from wvbot.game import GameState, Policy
+
+        for role_id in ("werewolf", "gunner", "doctor", "medium", "seer"):
+            state = GameState()
+            state.apply(
+                "game-started",
+                {
+                    "role": {"id": role_id},
+                    "players": [
+                        {"id": 1, "gridIdx": 0, "isAlive": False},
+                        {"id": 2, "gridIdx": 1, "isAlive": True, "role": "werewolf"},
+                        {"id": 3, "gridIdx": 2, "isAlive": False, "role": "villager"},
+                    ],
+                },
+            )
+            state.set_own_id(1)
+            state.dead_ids = [1, 3]
+            state.phase = "day-voting"
+            bot = shell(
+                cfg=types.SimpleNamespace(
+                    vill_win_mode=True,
+                    wolf_self_claim=True,
+                    turbo_mode=True,
+                    instant_kill=True,
+                    chat_enabled=True,
+                ),
+                state=state,
+                policy=Policy(),
+                store=StatusStore(),
+                _acted_keys=set(),
+                stop_event=threading.Event(),
+                _queue_action=lambda name, low, high, act: act(),
+            )
+            bot.log_event = lambda *a, **k: None
+            sock = FakeGameSocket()
+            bot._night_action(sock)
+            bot._wolf_self_claim(sock)
+            bot._day_vote(sock, immediate=True)
+            bot._killer_action(sock, instant=True)
+            bot._protector_action(sock)
+            bot._reviver_action(sock)
+            bot._investigator_action(sock)
+            self.assertEqual(sock.emitted, [], msg=f"dead {role_id} emitted {sock.emitted}")
+
+
+class PickRoomAndSessionFilterTest(unittest.TestCase):
+    def test_pick_room_folds_unicode_safe_casts_and_filters_full(self) -> None:
+        cfg = types.SimpleNamespace(prefer_small_rooms=True, max_room_size=10)
+        bot = shell(store=StatusStore(), cfg=cfg)
+        rooms = [
+            {"gameId": "full-max", "name": "TF Full", "playerCount": 8, "maxPlayerCount": 8},
+            {"gameId": "full-cfg", "name": "TF Cap", "playerCount": 10},
+            {"gameId": "good-tf", "name": "E VİLL WİN TF", "playerCount": "bad", "roles": ["r"] * 8},
+            {"gameId": "slow", "name": "Normal Room", "playerCount": 5, "regularXp": True},
+        ]
+        self.assertEqual(bot._pick_room(rooms)["gameId"], "good-tf")
+
+    def test_session_updates_status_when_pick_room_returns_none(self) -> None:
+        from wvbot.game import GameState
+
+        store = StatusStore()
+        bot = shell(
+            cfg=types.SimpleNamespace(room_names=["vill"], language="en", strict_8p_only=True),
+            state=GameState(),
+            store=store,
+            _acted_keys=set(),
+            auth=types.SimpleNamespace(ensure_token=lambda: "tok", auth_headers=lambda: {}),
+            api=types.SimpleNamespace(
+                find_rooms=lambda names: [{"gameId": "r1", "roles": ["r"] * 16, "playerCount": 10}],
+                auth_headers=lambda: {},
+            ),
+            log_event=mock.MagicMock(),
+        )
+        self.assertFalse(bot.session())
+        self.assertEqual(store.get().get("status"), "waiting for room")
+
+
+class RewardsGatingAndSafetyTest(unittest.TestCase):
+    def test_collect_rewards_gates_loot_boxes_on_open_loot_boxes_flag(self) -> None:
+        fake_rewards = mock.MagicMock()
+        fake_rewards.daily_rewards.return_value = []
+        bot = shell(
+            cfg=types.SimpleNamespace(
+                claim_daily_rewards=True,
+                spin_golden_wheel=False,
+                open_loot_boxes=False,
+            ),
+            http=mock.MagicMock(),
+            auth=types.SimpleNamespace(auth_headers=lambda: {}),
+            log_event=mock.MagicMock(),
+        )
+        with mock.patch.object(bot_module, "Rewards", return_value=fake_rewards):
+            bot._collect_rewards()
+        fake_rewards.open_loot_boxes.assert_not_called()
+
+        bot.cfg.open_loot_boxes = True
+        fake_rewards.loot_box_count.return_value = 2
+        with mock.patch.object(bot_module, "Rewards", return_value=fake_rewards):
+            bot._collect_rewards()
+        fake_rewards.open_loot_boxes.assert_called_once_with()
+
+    def test_claim_daily_writes_utc_marker_only_after_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(config_module, "STATE_DIR", Path(tmp)):
+                bot = shell(store=StatusStore(), log_event=mock.MagicMock())
+                fake_rewards = mock.MagicMock()
+                fake_rewards.daily_rewards.return_value = [{"type": "GOLD", "amount": 25}]
+                fake_rewards.claim_daily_reward.side_effect = [RuntimeError("503"), {"ok": True}]
+
+                # Transient error must leave daily_claim.txt absent so next attempt retries.
+                bot._claim_daily(fake_rewards)
+                marker = Path(tmp) / "daily_claim.txt"
+                self.assertFalse(marker.exists())
+
+                bot._claim_daily(fake_rewards)
+                self.assertEqual(fake_rewards.claim_daily_reward.call_count, 2)
+                expected_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                self.assertEqual(marker.read_text(encoding="utf-8").strip(), f"{expected_day}|GOLD")
+
+    def test_spin_wheel_requires_valid_cost_in_roses(self) -> None:
+        bot = shell(cfg=types.SimpleNamespace(wheel_max_roses=30), log_event=mock.MagicMock())
+        for bad_cond in ({}, {"costInRoses": None}, {"costInRoses": "nan"}):
+            fake_rewards = mock.MagicMock()
+            fake_rewards.golden_wheel_conditions.return_value = bad_cond
+            bot._spin_wheel(fake_rewards)
+            fake_rewards.spin_golden_wheel.assert_not_called()
 
 
 if __name__ == "__main__":

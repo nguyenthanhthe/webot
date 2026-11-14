@@ -87,6 +87,11 @@ class ReflexEngine:
         self.last_claimed_role = ""
         self.last_claim_time = 0.0
 
+    def reset_game(self) -> None:
+        """Clear per-game claim memory between matches."""
+        self.last_claimed_role = ""
+        self.last_claim_time = 0.0
+
     def can_reply(self, now: float | None = None) -> bool:
         """True if sufficient time has elapsed since the last automated reply."""
         if now is None:
@@ -99,7 +104,10 @@ class ReflexEngine:
             now = time.time()
         self.last_reply_time = now
         self.last_reply_text = text
-        if text.startswith("im ") or text in ("me", "im med", "im seer", "im doc"):
+        if (
+            text.startswith("im ")
+            or text in ("me", "w", "ww", "doc", "med here", "seer here")
+        ):
             self.last_claim_time = now
 
     def calculate_typing_delay(self, text: str) -> float:
@@ -124,11 +132,10 @@ class ReflexEngine:
         if not msg or not isinstance(msg, str):
             return None
 
+        own_id = getattr(state, "own_id", lambda: None)() if state is not None else None
         # Do not reply to self
-        if state is not None:
-            own_id = getattr(state, "own_id", lambda: None)()
-            if own_id is not None and str(author_id) == str(own_id):
-                return None
+        if own_id is not None and str(author_id) == str(own_id):
+            return None
 
         if not self.can_reply(now):
             return None
@@ -136,9 +143,9 @@ class ReflexEngine:
         clean = msg.strip().lower()
 
         # 1. Direct Mention / Username match
-        bot_names = ["botzxc", "zxc"]
-        if own_username:
-            bot_names.append(own_username.lower())
+        bot_names: list[str] = []
+        if own_username and own_username.strip():
+            bot_names.append(own_username.strip().lower())
 
         mentioned = False
         for name in bot_names:
@@ -147,11 +154,11 @@ class ReflexEngine:
                 break
 
         # Check seat number mention if available
-        if state is not None and hasattr(state, "players"):
+        if state is not None and hasattr(state, "players") and own_id is not None:
             for p in getattr(state, "players", []):
-                if getattr(state, "own_id", lambda: None)() == p.id:
-                    grid = getattr(p, "grid_idx", None)
-                    if grid is not None:
+                if own_id == p.id:
+                    grid = getattr(p, "grid_idx", -1)
+                    if isinstance(grid, int) and not isinstance(grid, bool) and grid >= 0:
                         seat_str = str(grid + 1)
                         # e.g., "14 afk?", "14 role?", "14 v?"
                         if re.search(r"\b" + seat_str + r"\b", clean):
@@ -169,6 +176,7 @@ class ReflexEngine:
                 if self.last_claimed_role == role_id and (now - self.last_claim_time) < 45.0:
                     return random.SystemRandom().choice(["already said", "told u", "said it"])
                 self.last_claimed_role = role_id
+                self.last_claim_time = now
                 if "wolf" in role_id or "werewolf" in role_id:
                     return random.SystemRandom().choice(["w", "im ww", "ww"])
                 short_role = ROLE_SHORT_NAMES.get(role_id, role_id.replace("-", " ") if role_id else "vill")
