@@ -112,6 +112,11 @@
     openRooms: [],
     joining: false,
     timer: null,
+    watchdogTimer: null,
+    killerUsed: false,
+    votedDay: false,
+    votedNight: false,
+    stopped: false,
   };
 
   /* ---------------------------------------------------------------- */
@@ -236,6 +241,12 @@
    * an hour, so the bot renews it long before it expires.
    */
   async function mintIdToken(refreshToken) {
+    if (typeof window.__wvMintIdToken === "function") {
+      const minted = await window.__wvMintIdToken();
+      if (!minted) throw new Error("__wvMintIdToken returned no idToken");
+      return minted;
+    }
+    if (!refreshToken) throw new Error("no refresh token available");
     const url = authApiUrl("/players/createIdToken");
     const response = await fetch(url, {
       method: "POST",
@@ -252,8 +263,8 @@
    * Make sure we have a usable idToken.
    *
    * The page session is preferred (its idToken matches the Cloudflare
-   * attestation the page holds).  When the page is not logged in but a
-   * refreshToken is configured, a new idToken is minted instead.
+   * attestation the page holds).  When the page is not logged in, mint a new
+   * idToken via the Node host bridge or configured refreshToken.
    */
   async function ensureToken() {
     const tokens = readAuthTokens();
@@ -269,7 +280,7 @@
       runtime.idToken = tokens.idToken;
       return runtime.idToken;
     }
-    if (runtime.refreshToken) {
+    if (runtime.refreshToken || typeof window.__wvMintIdToken === "function") {
       runtime.idToken = await mintIdToken(runtime.refreshToken);
       return runtime.idToken;
     }
@@ -365,7 +376,7 @@
               const info = extractGameInfo(parsed[1]);
               if (info && info.gameId) {
                 reportEvent("game", `page joined game ${info.gameId}`);
-                openGameSocket(info);
+                pushState({ game_id: String(info.gameId) });
               }
             }
           }
@@ -489,7 +500,14 @@
     socket.onAny((event, payload) => {
       if (event === "game-joined" || event === "mg:running-game" || event === "mg:game-running") {
         const info = extractGameInfo(payload);
-        if (info && info.gameId) openGameSocket(info);
+        if (info && info.gameId) {
+          pushState({ status: "playing", game_id: String(info.gameId), phase: "joined" });
+          reportEvent("game", `joined custom game ${info.gameId}`);
+          if (info.serverUrl && info.serverUrl !== CFG.gameHost) {
+            openGameSocket(info);
+            return;
+          }
+        }
       }
       // The server tells the lobby which rooms are open right now.
       if (event === "mg:games-open") {
@@ -500,6 +518,7 @@
           runtime.openRooms = games;
         }
       }
+      handleGameEvent(socket, event, payload);
     });
   }
 
@@ -528,13 +547,11 @@
       }
     }
     const query = {
-      gameId: info.gameId,
-      reconnect: "true",
-      gameMode: CFG.gameMode,
       ids: 1,
       apiV: 1,
       b: randomNonce(),
     };
+    if (runtime.idToken) query.firebaseToken = runtime.idToken;
     if (runtime.deviceId) query.deviceId = runtime.deviceId;
     const socket = window.io(info.serverUrl || CFG.gameHost, {
       path: "/socket.io",
@@ -549,6 +566,9 @@
     socket.on("connect", () => {
       reportEvent("game", "game socket connected");
       pushState({ status: "playing", game_id: String(info.gameId), phase: "joined" });
+      if (info.gameId) {
+        socket.emit("mg:join-open-game", { miniGameId: info.gameId });
+      }
     });
     socket.on("connect_error", (err) => {
       reportEvent("warn", `game socket error: ${err && err.message}`);
@@ -557,10 +577,8 @@
     socket.on("disconnect", (reason) => {
       reportEvent("warn", `game socket disconnected: ${reason}`);
       pushState({ status: "reconnecting", reconnects: state.reconnects + 1 });
-      // Being kicked out of the room ends the session: look for a room
-      // again instead of waiting for a game that will not come back.
       runtime.game = null;
-      scheduleJoin(3000);
+      if (!runtime.stopped) scheduleJoin(3000);
     });
     socket.onAny((event, payload) => handleGameEvent(socket, event, payload));
   }
@@ -579,16 +597,20 @@
         onGameStarted(data);
         break;
       case "game-day-voting-started":
+        runtime.votedDay = false;
+        runtime.killerUsed = false;
         pushState({ phase: "day-voting" });
         dayVote(socket);
         break;
       case "game-night-started":
+        runtime.votedNight = false;
+        runtime.killerUsed = false;
         pushState({ phase: "night" });
         nightVote(socket);
         break;
       case "game-werewolves-vote-set":
         pushState({ phase: "night-voting" });
-        nightVote(socket);
+        if (!runtime.votedNight) nightVote(socket);
         break;
       case "game-day-vote-set":
         onDayVote(data);
@@ -629,6 +651,9 @@
     runtime.dead = new Set();
     runtime.dayVotes = new Map();
     runtime.messages = [];
+    runtime.killerUsed = false;
+    runtime.votedDay = false;
+    runtime.votedNight = false;
 
     const roleId = data && data.role ? String(data.role) : "";
     runtime.role = roleMeta(roleId) || { id: roleId, name: roleId, team: "" };
@@ -748,6 +773,7 @@
       for (const player of runtime.players.values()) {
         if (!player.username) continue;
         if (String(author) === player.id) continue;
+        if (runtime.ownId && player.id === String(runtime.ownId)) continue;
         if (text.indexOf(String(player.username).toLowerCase()) !== -1) {
           counts.set(player.id, (counts.get(player.id) || 0) + 1);
         }
@@ -758,15 +784,17 @@
       const text = String((message && message.msg) || "").trim().toLowerCase();
       if (["me", "m", "wc", "wolf", "im the wolf", "i am wolf"].indexOf(text) === -1) continue;
       const author = String(message.authorId);
-      if (author === String(runtime.ownId)) continue;
+      if (runtime.ownId && author === String(runtime.ownId)) continue;
       if (runtime.players.has(author)) counts.set(author, (counts.get(author) || 0) + 2);
     }
     return counts;
   }
 
   function dayVote(socket) {
+    if (runtime.votedDay) return;
     if (runtime.ownId && runtime.dead.has(String(runtime.ownId))) return;
-    const alive = alivePlayers();
+    const ownId = runtime.ownId ? String(runtime.ownId) : null;
+    const alive = alivePlayers().filter((p) => !ownId || p.id !== ownId);
     if (!alive.length) return;
     const counts = accusations();
     let target = null;
@@ -777,6 +805,7 @@
         target = id;
       }
     }
+    runtime.votedDay = true;
     if (target) {
       socket.emit("game-day-vote-set", JSON.stringify({ targetPlayerId: target }));
       reportEvent("action", `day vote -> ${target}`);
@@ -787,13 +816,17 @@
   }
 
   function nightVote(socket) {
+    if (runtime.votedNight) return;
     if (!isWolf(runtime.role)) return;
-    const alive = alivePlayers().filter((p) => p.id !== String(runtime.ownId));
+    if (runtime.ownId && runtime.dead.has(String(runtime.ownId))) return;
+    const ownId = runtime.ownId ? String(runtime.ownId) : null;
+    const alive = alivePlayers().filter((p) => !ownId || p.id !== ownId);
     if (!alive.length) return;
     const counts = accusations();
     const quiet = alive.filter((p) => !counts.get(p.id));
     const pool = quiet.length ? quiet : alive;
     const target = pick(pool);
+    runtime.votedNight = true;
     socket.emit("game-werewolves-vote-set", JSON.stringify({ targetPlayerId: target.id }));
     reportEvent("action", `werewolf vote -> ${target.username || target.id}`);
     state.kills += 1;
@@ -801,11 +834,21 @@
   }
 
   function killerAction(socket) {
+    if (runtime.killerUsed) return;
+    if (runtime.ownId && runtime.dead.has(String(runtime.ownId))) return;
     const event = KILLER_EVENTS[String(runtime.role.id || "").toLowerCase()];
     if (!event) return;
+    const ownId = runtime.ownId ? String(runtime.ownId) : null;
+    const aliveIds = new Set(alivePlayers().map((p) => p.id));
     let target = null;
-    for (const value of runtime.dayVotes.values()) target = value;
+    for (const value of runtime.dayVotes.values()) {
+      const candidate = String(value);
+      if (aliveIds.has(candidate) && (!ownId || candidate !== ownId)) {
+        target = candidate;
+      }
+    }
     if (!target) return;
+    runtime.killerUsed = true;
     socket.emit(event, JSON.stringify({ targetPlayerId: target }));
     reportEvent("action", `${event} -> ${target}`);
   }
@@ -835,12 +878,19 @@
       }
     }
     try {
-      socket.close();
+      socket.emit("mg:exit-game");
     } catch (err) {
       /* ignore */
     }
-    runtime.game = null;
-    scheduleJoin(4000);
+    if (runtime.game && socket === runtime.game) {
+      try {
+        runtime.game.close();
+      } catch (err) {
+        /* ignore */
+      }
+      runtime.game = null;
+    }
+    if (!runtime.stopped) scheduleJoin(4000);
   }
 
   /* ---------------------------------------------------------------- */
@@ -915,7 +965,12 @@
    * in their handshake.
    */
   function startTokenWatchdog() {
+    if (runtime.watchdogTimer) {
+      clearInterval(runtime.watchdogTimer);
+      runtime.watchdogTimer = null;
+    }
     const timer = setInterval(async () => {
+      if (runtime.stopped) return;
       try {
         const tokens = readAuthTokens();
         const expiry = jwtExpiry(tokens.idToken);
@@ -925,16 +980,19 @@
 
         if (!stale && !changed) return;
 
-        if (stale && runtime.refreshToken) {
+        if (stale && (runtime.refreshToken || typeof window.__wvMintIdToken === "function")) {
           reportEvent("login", "renewing the firebase token");
           runtime.idToken = await mintIdToken(runtime.refreshToken);
         } else if (tokens.idToken) {
           runtime.idToken = tokens.idToken;
         }
         runtime.cfJwt = readCfJwt();
-        // The sockets carry the token in their handshake, so they have to
-        // be rebuilt with the new one.
         if (runtime.game) {
+          try {
+            runtime.game.emit("mg:exit-game");
+          } catch (err) {
+            /* ignore */
+          }
           runtime.game.close();
           runtime.game = null;
         }
@@ -947,7 +1005,36 @@
         reportEvent("warn", `token refresh failed: ${err && err.message}`);
       }
     }, 60 * 1000);
+    runtime.watchdogTimer = timer;
     return timer;
+  }
+
+  function stop() {
+    runtime.stopped = true;
+    if (runtime.timer) {
+      clearTimeout(runtime.timer);
+      runtime.timer = null;
+    }
+    if (runtime.watchdogTimer) {
+      clearInterval(runtime.watchdogTimer);
+      runtime.watchdogTimer = null;
+    }
+    for (const sock of [runtime.game, runtime.lobby]) {
+      if (!sock) continue;
+      try {
+        sock.emit("mg:exit-game");
+      } catch (err) {
+        /* ignore */
+      }
+      try {
+        sock.close();
+      } catch (err) {
+        /* ignore */
+      }
+    }
+    runtime.game = null;
+    runtime.lobby = null;
+    if (window.__wvbotBot) window.__wvbotBot.alive = false;
   }
 
   async function boot() {
@@ -957,7 +1044,7 @@
     runtime.idToken = tokens.idToken;
     runtime.refreshToken = tokens.refreshToken || CFG.refreshToken || null;
     runtime.cfJwt = readCfJwt();
-    if (!runtime.idToken && !runtime.refreshToken) {
+    if (!runtime.idToken && !runtime.refreshToken && typeof window.__wvMintIdToken !== "function") {
       reportEvent("error", "no firebase token yet (not logged in?)");
       pushState({ status: "waiting for login" });
       setTimeout(boot, 5000);
@@ -983,11 +1070,14 @@
     connectLobby();
   }
 
+  window.addEventListener("beforeunload", stop);
+
   window.__wvbotBot = Object.assign(function () {}, {
     alive: true,
     state,
     joinRoom,
     listRooms,
+    stop,
     /** Events the supervisor has not picked up yet. */
     drainEvents() {
       const events = recentEvents.slice();

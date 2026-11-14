@@ -5,10 +5,14 @@
   "description": "Headless websocket-injection bot for Wolvesville custom games",
   "type": "module",
   "main": "bot.mjs",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "start": "node bot.mjs",
-    "login": "node bot.mjs --login-only",
-    "dashboard": "node bot.mjs --dashboard-only"
+    "login": "node login.mjs",
+    "dashboard": "node dashboard.mjs",
+    "check": "node --check bot.mjs dashboard.mjs login.mjs payload.js"
   },
   "dependencies": {
     "playwright": "^1.64.1",

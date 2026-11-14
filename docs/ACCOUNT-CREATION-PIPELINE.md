@@ -1,6 +1,6 @@
-# End-to-End Account Provisioning Pipeline: Cloudflare Temp Email + Wolvesville Farm
+# End-to-End Account Provisioning Pipeline: Temp Email + Wolvesville Farm
 
-This document details the complete technical architecture and implementation blueprint for automated, end-to-end account provisioning for the Wolvesville Bot Farm using [`dreamhunter2333/cloudflare_temp_email`](https://github.com/dreamhunter2333/cloudflare_temp_email).
+This document details the technical architecture and workflow for farm account provisioning using zero-config [Mail.tm](https://api.mail.tm) (`MailTmClient`) or self-hosted [`dreamhunter2333/cloudflare_temp_email`](https://github.com/dreamhunter2333/cloudflare_temp_email) (`TempEmailClient`).
 
 ---
 
@@ -8,37 +8,37 @@ This document details the complete technical architecture and implementation blu
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                       AUTOMATED PROVISIONING PIPELINE                       │
+│                         ACCOUNT PROVISIONING PIPELINE                       │
 └─────────────────────────────────────────────────────────────────────────────┘
                                        │
            1. Generate Mailbox         ▼
    ┌────────────────────────────────────────────────────────┐
-   │ Cloudflare Temp Email Worker (dreamhunter2333)        │
-   │  POST /admin/new_address  (x-admin-auth: <secret>)     │
-   │  Returns: { address, jwt }                             │
+   │ Temp Email Provider (wvbot/temp_email.py)              │
+   │  • MailTmClient (api.mail.tm, zero setup)              │
+   │  • TempEmailClient (/admin/new_address + x-admin-auth) │
+   │  Returns: Mailbox(address, jwt)                        │
    └───────────────────────────────────┬────────────────────┘
                                        │
-           2. Execute Registration     ▼
+           2. Explicit Browser Step    ▼
    ┌────────────────────────────────────────────────────────┐
-   │ Registration Bridge (Headless Firefox / Playwright)    │
-   │  • Solves Cloudflare Turnstile attestation             │
-   │  • Submits { email, username, password }               │
-   │  • Triggers Wolvesville verification email             │
+   │ Operator Browser / Explicit register_fn Callback       │
+   │  • Interactive Turnstile/human verification if prompted│
+   │  • Submits sign-up { email, username, password }       │
+   │  • Note: wvbot includes no CAPTCHA/Turnstile bypasses  │
    └───────────────────────────────────┬────────────────────┘
                                        │
            3. Poll Inbox & Verify      ▼
    ┌────────────────────────────────────────────────────────┐
-   │ Verification Listener (tools/temp_email.py)            │
-   │  • GET /api/parsed_mails (Authorization: Bearer <jwt>) │
-   │  • Extracts verification code or activation URL        │
-   │  • Completes email confirmation                        │
+   │ Verification Listener (wvbot.temp_email)               │
+   │  • Polls Mail.tm /messages or /api/parsed_mails        │
+   │  • Extracts 6-digit code or confirmation URL           │
    └───────────────────────────────────┬────────────────────┘
                                        │
            4. Mint Refresh Token       ▼
    ┌────────────────────────────────────────────────────────┐
-   │ Token Exfiltration                                     │
-   │  • Calls signInWithEmailAndPassword with Cf-JWT        │
-   │  • Retrieves durable refreshToken                      │
+   │ Token Acquisition                                      │
+   │  • signInWithEmailAndPassword in authenticated browser │
+   │  • Retrieves durable Firebase refreshToken             │
    └───────────────────────────────────┬────────────────────┘
                                        │
            5. Dynamic Cluster Join     ▼
@@ -52,16 +52,15 @@ This document details the complete technical architecture and implementation blu
 
 ---
 
-## 2. Cloudflare Temp Email API Specification
+## 2. Temp Email Providers
 
-The `dreamhunter2333/cloudflare_temp_email` backend runs on Cloudflare Workers (using KV and D1 databases). It exposes standard JSON endpoints:
+### A. Zero-Config Mail.tm (`MailTmClient`, default `--url auto`)
+Requires no worker deployment or admin secret: queries active domains on `https://api.mail.tm`, creates an account via `POST /accounts`, mints a bearer token via `POST /token`, and polls `GET /messages`.
 
-### A. Creating a New Address
-- **Endpoint:** `POST https://<temp-email-worker-url>/admin/new_address`
-- **Headers:**
-  - `x-admin-auth: <ADMIN_PASSWORD>`
-  - `Content-Type: application/json`
-- **Request Body:**
+### B. Self-Hosted Cloudflare Temp Email (`TempEmailClient`)
+Runs on Cloudflare Workers (`dreamhunter2333/cloudflare_temp_email`):
+
+- **Create address:** `POST https://<worker-url>/admin/new_address` with `x-admin-auth: <ADMIN_PASSWORD>` and optional `x-custom-auth: <SITE_PASSWORD>`:
   ```json
   {
     "enablePrefix": true,
@@ -69,77 +68,61 @@ The `dreamhunter2333/cloudflare_temp_email` backend runs on Cloudflare Workers (
     "domain": "yourdomain.com"
   }
   ```
-- **Response:**
-  ```json
-  {
-    "jwt": "eyJhbGciOi...",
-    "address": "wvbot_alpha@yourdomain.com"
-  }
-  ```
-
-### B. Listening for Inbound Verification Emails
-- **Endpoint:** `GET https://<temp-email-worker-url>/api/parsed_mails?limit=10`
-- **Headers:**
-  - `Authorization: Bearer <JWT>`
-- **Response:**
-  ```json
-  [
-    {
-      "id": "msg_12345",
-      "from": "no-reply@wolvesville.com",
-      "subject": "Verify your Wolvesville email",
-      "text": "Your verification code is: 489201 ...",
-      "html": "<div>...</div>"
-    }
-  ]
-  ```
+  Returns `{"jwt": "...", "address": "wvbot_alpha@yourdomain.com"}`.
+- **Poll parsed mail:** `GET https://<worker-url>/api/parsed_mails?limit=20` with `Authorization: Bearer <JWT>`.
 
 ---
 
-## 3. Python Integration Helper (`tools/temp_email.py`)
+## 3. Python API & CLI (`wvbot/temp_email.py`, `tools/temp_email.py`)
 
-The pipeline includes a zero-dependency standard library client `TempEmailClient` to interact with any deployed `cloudflare_temp_email` instance:
+Implementation lives in `wvbot/temp_email.py`, with `tools/temp_email.py` providing a thin CLI wrapper and re-exports:
 
 ```python
-from wvbot.tools.temp_email import TempEmailClient
+from wvbot.temp_email import MailTmClient, TempEmailClient
 
-client = TempEmailClient(
+# Option 1: Zero-config Mail.tm
+client = MailTmClient()
+mailbox = client.create_mailbox(name="bot_acc")
+
+# Option 2: Self-hosted Cloudflare Temp Email
+cf_client = TempEmailClient(
     base_url="https://mail.example.com",
     admin_password="your_admin_password",
 )
-
-# 1. Create a mailbox
-mailbox = client.create_mailbox(prefix="bot_acc")
+mailbox = cf_client.create_mailbox(name="bot_acc", domain="yourdomain.com")
 print(f"Created: {mailbox.address}")
 
-# 2. Wait for incoming verification email
-code = client.wait_for_verification_code(mailbox.jwt, timeout_sec=120)
+code = cf_client.wait_for_verification_code(mailbox.jwt, timeout_sec=120)
 print(f"Received verification code: {code}")
+```
+
+`AccountProvisioner` (`wvbot/provision.py`) requires an explicit `register_fn` callback (for example, your own visible browser Playwright/Marionette flow where an operator handles Turnstile if challenged) and fails fast when none is configured.
+
+CLI usage:
+
+```bash
+python tools/temp_email.py create --url auto --name bot_acc
+python tools/temp_email.py wait --url auto --jwt "<jwt>" --timeout 120
+python tools/provision_farm.py --url auto --count 1 --api-url http://127.0.0.1:8787 --token "<dashboard-token>"
 ```
 
 ---
 
 ## 4. Token Minting and Cluster Integration
 
-Once the account is verified, authenticate once inside the browser context to obtain the permanent `refreshToken`:
-
-```javascript
-// Inside browser page context with valid Turnstile attestation
-const cfJwt = window.localStorage.getItem("cloudflare-turnstile-jwt");
-const res = await fetch("https://auth.api-wolvesville.com/players/signInWithEmailAndPassword", {
-  method: "POST",
-  headers: { "Content-Type": "application/json", "Cf-JWT": cfJwt },
-  body: JSON.stringify({ email: address, password: password }),
-});
-const { refreshToken } = await res.json();
-```
-
-Finally, register the bot into the running farm cluster via `POST /api/accounts`:
+Once an account has been created and confirmed interactively in a browser session, save its `refreshToken` directly or register it into the running farm cluster via `POST /api/accounts` (include `Authorization: Bearer <token>` when dashboard auth is active):
 
 ```bash
 curl -X POST http://127.0.0.1:8787/api/accounts \
+  -H "Authorization: Bearer <dashboard-token>" \
   -H "Content-Type: application/json" \
   -d '{"name": "bot_alpha", "refresh_token": "<refreshToken>"}'
 ```
 
-The farm immediately persists the account under `~/.wv-bot/accounts/bot_alpha/refresh_token.txt` and hot-launches a new supervised thread.
+Or offline via the CLI:
+
+```bash
+python tools/roster.py add bot_alpha --refresh-token "<refreshToken>"
+```
+
+The farm persists the credential under `$STATE_DIR/accounts/bot_alpha/refresh_token.txt` with mode `0600` and launches the supervised bot slot.

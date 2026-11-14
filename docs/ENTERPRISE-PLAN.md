@@ -101,10 +101,11 @@ Decisions and why:
 
 ## Security
 
-* The dashboard **requires a token** once it serves more than one
-  account: a random string in the farm root, sent as a query/header
-  from the browser.  Today it binds 0.0.0.0 with no auth - acceptable
-  for one account on a home LAN, not for a farm.
+* The dashboard binds `127.0.0.1` by default and supports shared token
+  authentication (`WV_BOT_DASHBOARD_TOKEN` or `$STATE_DIR/dashboard_token.txt`
+  via `Authorization: Bearer` / `X-Dashboard-Token` / `?token=`),
+  automatically enabling token auth whenever configured on a non-loopback host.
+  `GET /health` remains unauthenticated for container liveness probes.
 * Credentials at rest: mode 600 (already), never in the repo, never
   in the logs (the log lines show outcomes, not tokens).
 * The http allowlist and the SSRF guards stay untouched.
@@ -139,18 +140,17 @@ window on the phone; phase 4 is repository work.
 5. **Docker packaging** - the whole product as one image, landed after
    the phases above are done:
 
-   * `Dockerfile`: `python:3.12-slim`, the `wvbot/` package copied in,
-     `python -m wvbot` as the entrypoint.  The bot is stdlib only, so
-     the image has **zero pip installs** - it builds in seconds and
-     the attack surface is the Python runtime alone.
-   * `docker-compose.yml`: the state directory as a named volume
-     (`/data` -> the farm root: `accounts.json`, per-account state),
-     `8787` published for the dashboard, `restart: unless-stopped`,
-     and a **healthcheck** that curls `/api/farm` so the container
-     supervisor restarts a wedged farm without phone-side watchdogs.
+   * `Dockerfile`: `python:3.12-slim`, dedicated non-root `wvbot` user owning
+     `/app` and `/data`, `wvbot/`, `run.py`, and `setcreds.py` copied in,
+     `ENV STATE_DIR=/data`, `python run.py` as the default command, and a
+     `HEALTHCHECK` querying `http://127.0.0.1:8787/health`. The bot is stdlib
+     only, so the image has zero pip installs.
+   * `docker-compose.yml`: `./data:/data` volume mount for persistent farm
+     state (`accounts.json`, per-account state), `127.0.0.1:8787:8787`
+     published for the dashboard, and `restart: unless-stopped`.
    * The config stays out of the image: everything durable is a
      volume, everything secret is mode-600 inside it.
-   * Verification path: this laptop has no Docker; the image is built
-     and smoke-tested by the GitHub Actions workflow (phase 4's CI)
-     and by the operator's Docker machine.  The compose file carries
-     the healthcheck so `docker compose up` is the whole manual.
+   * Verification path: `.github/workflows/test.yml` runs the stdlib
+     unittest suite (`python -B -m unittest discover -s tests -v`),
+     bytecode compilation (`compileall`), `tools/package.py --check`,
+     shell syntax checks (`sh -n`), and `web/` syntax checks (`node --check`).

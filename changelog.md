@@ -7,7 +7,57 @@ and the project uses [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
-Planned work, see `docs/FEATURE-PLAN.md` for the full list.
+### Changed
+- **Entrypoints & Containers**:
+  - Updated `run.py` to resolve `ROOT` from `__file__`, guard Termux wake-lock and `resolv.conf` fixes behind `/data/data/com.termux/files/usr`, and forward CLI arguments cleanly to `wvbot.__main__`.
+  - Updated `setcreds.py` to honor `WV_BOT_STATE_DIR` / `STATE_DIR`, write `refresh_token.txt` atomically with `0600` permissions without broken plaintext password prompts, and restart Termux via `tools/bot_ctl.sh`.
+  - Hardened `Dockerfile` (non-root `wvbot` user, `STATE_DIR=/data`, `/health` `HEALTHCHECK`) and `docker-compose.yml` (removed obsolete `version`, bound `127.0.0.1:8787:8787`), and aligned `config.json` defaults with `wvbot/config.py`.
+- **Tools, Web Companion, CI & Docs**:
+  - Replaced duplicate `tools/temp_email.py` implementation with a thin wrapper/CLI re-exporting `wvbot.temp_email` (supporting both Mail.tm and Cloudflare Temp Email).
+  - Hardened `tools/job_watchdog.sh` (POSIX float stripping, multi-account heartbeat scanning, stale lock cleanup + immediate restart), fixed `tools/roster.py` HTTP API / locked offline sync, updated `tools/package.py` (`--check`, `--output`, full `wvbot/*.py` manifest), `tools/deploy.py`, `tools/drill_watchdog.py`, `tools/status.py`, `tools/provision_farm.py`, and replaced Python-in-shell probe scripts with `.py` tools.
+  - Fixed XSS, pathname parsing, token storage permissions (`0600`), Node-side token minting, lobby-socket custom game handling, self-vote/once-per-phase killer guards, and `mg:exit-game` / interval cleanup in `web/`.
+  - Expanded `.github/workflows/test.yml` with Python 3.14 matrix, `compileall`, `package.py --check`, `sh -n`, and `node --check`.
+
+## [1.1.0] - 2026-11-10
+
+Automated Farm Account Provisioning (`wvbot/temp_email.py`, `wvbot/provision.py`).
+
+### Added
+- **Zero-Config Mail.tm & Cloudflare Temp Email Provisioning**:
+  - Added `MailTmClient` (`api.mail.tm`) alongside `TempEmailClient` in `wvbot/temp_email.py` so automated inbox creation requires zero external worker setup by default (`--url auto`).
+  - Added `AccountProvisioner` (`wvbot/provision.py`), `tools/provision_farm.py`, and `POST /api/provision` to generate ephemeral inboxes, extract verification codes, persist credentials into the farm roster, and require an explicit registration callback (no Turnstile bypasses).
+
+## [1.0.9] - 2026-11-10
+
+### Fixed
+- **Leakproof Ban Sleep Loop**: Hardened ban wait handling (`bannedUntilTime`) in `wvbot/bot.py` so banned sessions stay silent until the server cooldown expires.
+
+## [1.0.8] - 2026-11-08
+
+### Changed
+- **Reflex & TF Room Filtering**: Added universal role-claim support in `wvbot/reflex.py` and `strict_tf_only` room guard in config/bot selection.
+
+## [1.0.7] - 2026-11-08
+
+### Added
+- **0-XP Room Skip & TF Detection**: Automatically skips custom rooms where `regularXp` is `false`, adds timer-based TF detection (`dayVotingDurationInMs` / `nightDurationInMs`), and tracks seat-number accusations.
+
+## [1.0.6] - 2026-11-08
+
+### Added
+- **Rapid TF Farm & Bandwagon Voting**: Added bandwagon day voting, immediate voting on wolf claims, TF room priority ordering, NFKD room-name folding, `'is ww'` matching, and `stay_in_room_max_game_duration_sec` slow-room exit guard.
+
+## [1.0.5] - 2026-11-07
+
+### Added
+- **Continuous Rematch & 8P Room Preference**: Added `stay_in_room` rematch loop, `prefer_8p_rooms` / `strict_8p_only` room selection with `maxPlayerCount` verification, WW Say M claim support, and Say M priority.
+### Fixed
+- Fixed dynamic `auth_headers` callable refresh to prevent stale token HTTP 401 responses.
+
+## [1.0.4] - 2026-11-07
+
+### Added
+- **Turbo Vill-Win Engine**: Added `vill_win_mode`, `wolf_self_claim`, and `instant_kill` config options, shadow-wolf / werewolf variant recognition, `reflex_count` & bio-break telemetry, role-claim deduplication with 20s adaptive cooldown in `wvbot/reflex.py`, and included `reflex.py` in `tools/package.py`.
 
 ## [1.0.3] - 2026-11-07
 

@@ -1,9 +1,10 @@
-"""Launcher for the Wolvesville bot on Android/Termux.
+"""Launcher for the Wolvesville bot (Termux, Linux, Windows, and Docker).
 
-Usage (inside Termux):
+Usage:
 
-    python3 run.py               # protocol mode: pure Python over socket.io
-    python3 run.py --mode web    # headless Firefox + injected payload
+    python3 run.py                 # protocol mode: pure Python over socket.io
+    python3 run.py --mode farm     # multi-account farm supervisor + dashboard
+    python3 run.py --mode web      # headless Firefox + injected payload
 
 The protocol mode is the default because it needs nothing but the Python
 standard library: it mints its own firebase token from the refresh token,
@@ -24,17 +25,17 @@ import sys
 from pathlib import Path
 
 PREFIX = Path("/data/data/com.termux/files/usr")
-TERMUX_HOME = Path("/data/data/com.termux/files/home")
-HOME = Path(os.environ.get("HOME", str(TERMUX_HOME)))
-ROOT = HOME / "wv-bot"
-WAKE_LOCK = "/data/data/com.termux/files/usr/bin/termux-wake-lock"
+ROOT = Path(__file__).resolve().parent
+WAKE_LOCK = PREFIX / "bin" / "termux-wake-lock"
 
 
 def _wake_lock() -> None:
     """Ask Termux to keep the CPU awake while the bot runs."""
+    if not PREFIX.is_dir():
+        return
     try:
         subprocess.run(
-            [WAKE_LOCK],
+            [str(WAKE_LOCK)],
             shell=False,
             check=False,
             timeout=10,
@@ -43,19 +44,23 @@ def _wake_lock() -> None:
         print(f"wake lock failed: {exc}", file=sys.stderr)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Wolvesville bot")
-    parser.add_argument("--mode", choices=["web", "protocol", "farm"], default="protocol")
-    args = parser.parse_args()
+    parser.add_argument("--mode", choices=["web", "protocol", "farm"], default=None)
+    args, extra = parser.parse_known_args(argv)
 
     os.chdir(ROOT)
-    sys.path.insert(0, str(ROOT))
-    _wake_lock()
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
 
-    from wvbot.netfix import ensure_dns
+    if PREFIX.is_dir():
+        _wake_lock()
+        from wvbot.netfix import ensure_dns
 
-    print(f"dns: {ensure_dns()}")
-    print("dashboard: http://127.0.0.1:8787/  (adb forward tcp:8787 tcp:8787)")
+        print(f"dns: {ensure_dns()}")
+        print("dashboard: http://127.0.0.1:8787/  (adb forward tcp:8787 tcp:8787)")
+    else:
+        print("dashboard: http://127.0.0.1:8787/")
 
     if args.mode == "web":
         from wvbot.webbot import main as web_main
@@ -64,6 +69,12 @@ def main() -> int:
 
     if args.mode == "farm":
         os.environ["WV_BOT_FARM"] = "1"
+
+    forwarded: list[str] = []
+    if args.mode in ("protocol", "farm"):
+        forwarded.extend(["--mode", args.mode])
+    forwarded.extend(extra)
+    sys.argv = [sys.argv[0], *forwarded]
 
     from wvbot.__main__ import main as protocol_main
 
