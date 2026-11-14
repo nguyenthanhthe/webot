@@ -32,7 +32,6 @@ log = logging.getLogger("wvbot.webbot")
 
 GAME_URL = "https://www.wolvesville.com/"
 PAYLOAD_FILE = "payload.js"
-ELEMENT_KEY = "element-6066-11e4-a52e-4f735466cecf"
 
 FILL_JS = """
 var kind = arguments[0];
@@ -194,35 +193,6 @@ class WebBot:
             log.debug("click %s failed: %s", patterns, exc)
             return False
 
-    def _solve_turnstile(self, client: Marionette) -> bool:
-        """Click the Turnstile checkbox when it is visible."""
-        try:
-            found = client.send(
-                "WebDriver:FindElement",
-                {"using": "css selector", "value": "iframe[src*='challenges.cloudflare.com']"},
-            )
-            element = found.get(ELEMENT_KEY) or found.get("value", {}).get(ELEMENT_KEY)
-            if not element:
-                return False
-            client.send("WebDriver:SwitchToFrame", {"element": element})
-            try:
-                box = client.send(
-                    "WebDriver:FindElement",
-                    {"using": "css selector", "value": "input[type=checkbox], label, .cb-lb"},
-                )
-                target = box.get(ELEMENT_KEY) or box.get("value", {}).get(ELEMENT_KEY)
-                if target:
-                    client.send("WebDriver:ElementClick", {"id": target})
-                    return True
-            finally:
-                try:
-                    client.send("WebDriver:SwitchToParentFrame", {})
-                except Exception:  # noqa: BLE001
-                    pass
-        except Exception as exc:  # noqa: BLE001 - no challenge, or not clickable
-            log.debug("turnstile click failed: %s", exc)
-        return False
-
     # ------------------------------------------------------------------
     def _login(self, client: Marionette) -> bool:
         """Make sure the page has a session; returns True when it does."""
@@ -267,11 +237,6 @@ class WebBot:
         )
         if self.stop_event.wait(1):
             return False
-
-        if self._solve_turnstile(client):
-            self.log_event("login", "turnstile solved")
-            if self.stop_event.wait(2):
-                return False
 
         self._click_text(
             client, ["Log in", "Log In", "Login", "Sign in", "Continue", "Tiếp tục"]
