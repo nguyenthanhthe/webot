@@ -514,6 +514,8 @@ class Bot:
                 reward=self._reward,
                 rooms=self._room_probe,
                 hub=self.hub,
+                token=getattr(self.cfg, "dashboard_token", ""),
+                state_dir=getattr(self, "account_dir", None),
             )
         try:
             self.log_event("bot", f"bot starting (v{__version__})")
