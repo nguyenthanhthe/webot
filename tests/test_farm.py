@@ -645,6 +645,19 @@ class FarmSecurityAndResilienceTest(unittest.TestCase):
             finally:
                 farm.stop()
 
+    def test_farm_start_touches_root_heartbeat_for_watchdog(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            farm = Farm([{"name": "main"}], FakeBot, farm_root=root)
+            farm.start()
+            try:
+                hb = root / "heartbeat.txt"
+                self.assertTrue(hb.is_file())
+                ts = float(hb.read_text(encoding="utf-8").strip())
+                self.assertGreater(ts, 0.0)
+            finally:
+                farm.stop()
+
 
 if __name__ == "__main__":
     unittest.main()

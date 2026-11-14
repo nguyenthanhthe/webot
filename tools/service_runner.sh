@@ -67,8 +67,8 @@ echo $$ > "$PIDFILE"
 # go to sleep while it runs.
 termux-wake-lock >/dev/null 2>&1 || true
 
-# The bot runs as a child, so the stop flag can end it at any time.
-python3 run.py --mode protocol >> "$LOG" 2>&1 &
+# The bot runs in farm mode by default so single- and multi-account rosters share one supervisor.
+python3 run.py --mode "${WV_BOT_MODE:-farm}" >> "$LOG" 2>&1 &
 bot_pid=$!
 
 while kill -0 "$bot_pid" 2>/dev/null; do

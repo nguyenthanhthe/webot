@@ -120,6 +120,11 @@ def main(argv: list[str] | None = None) -> int:
     for src, dst in stage_files:
         if not src.is_file():
             raise SystemExit(f"missing deploy artifact: {src}")
+        # ponytail: ensure Windows CRLF never breaks Termux POSIX sh during adb push
+        if src.name != ZIP:
+            raw = src.read_bytes()
+            if b"\r\n" in raw:
+                src.write_bytes(raw.replace(b"\r\n", b"\n"))
         adb("push", str(src), dst, serial=target)
 
     print("== installing (the phone's own installer) ==")

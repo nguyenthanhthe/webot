@@ -1,0 +1,2 @@
+*.sh text eol=lf
+tools/boot_wvbot text eol=lf

@@ -155,6 +155,19 @@ def main(argv: list[str] | None = None) -> int:
     if status.get("last_error"):
         print(f"  last_error     {status['last_error']}")
 
+    farm = fetch("/api/farm", port=args.port, token=token)
+    if isinstance(farm, dict) and isinstance(farm.get("bots"), list) and farm["bots"]:
+        print(f"=== farm slots ({farm.get('status')}) ===")
+        for slot in farm["bots"]:
+            line = (
+                f"  {slot.get('name', '?'):<10} status={slot.get('status', '?')} "
+                f"user={slot.get('username') or '-'} lv={slot.get('level') or 0} "
+                f"xp={slot.get('xp_total') or 0} games={slot.get('games_played') or 0}"
+            )
+            if slot.get("banned_until"):
+                line += f" banned_until={slot['banned_until']}"
+            print(line)
+
     print("=== processes on the phone ===")
     for line in adb("shell", "ps", "-A", serial=target).splitlines():
         if "firefox" in line or "run.py" in line:

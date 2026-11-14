@@ -111,6 +111,8 @@ class LoadConfigTest(unittest.TestCase):
         cfg = load_config("missing-config.json")
         self.assertEqual(cfg.joins_per_hour, 12)
         self.assertEqual(cfg.room_names, ["vill win"])
+        self.assertTrue(cfg.strict_8p_only)
+        self.assertEqual(cfg.max_room_size, 8)
         self.assertEqual(cfg.dashboard_host, "127.0.0.1")
         self.assertEqual(cfg.dashboard_token, "")
         self.assertTrue(cfg.fast_reconnect_enabled)

@@ -382,9 +382,10 @@ class SyntaxValidationTests(unittest.TestCase):
         if sh_bin is None:
             self.skipTest("sh binary not available")
 
-        scripts = sorted((ROOT / "tools").glob("*.sh"))
+        scripts = [*sorted((ROOT / "tools").glob("*.sh")), ROOT / "tools" / "boot_wvbot"]
         self.assertTrue(scripts)
         for script in scripts:
+            self.assertNotIn(b"\r", script.read_bytes(), msg=f"{script.name} contains CRLF")
             res = subprocess.run([sh_bin, "-n", str(script)], capture_output=True, text=True, check=False)
             self.assertEqual(res.returncode, 0, msg=f"{script.name}: {res.stderr}")
 

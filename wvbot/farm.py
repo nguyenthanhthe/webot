@@ -365,6 +365,7 @@ class Farm:
             self._slots.append(_Slot(account))
         self._supervisor: threading.Thread | None = None
         self._last_publish = 0.0
+        self._last_heartbeat = 0.0
 
     # ------------------------------------------------------------------
     def _room_probe(self, language: str = "en", host: str = "") -> Any:
@@ -557,7 +558,20 @@ class Farm:
                 pass
 
     # ------------------------------------------------------------------
+    def _touch_root_heartbeat(self, force: bool = False) -> None:
+        if self.farm_root is None:
+            return
+        now = time.time()
+        if not force and (now - self._last_heartbeat) < 60.0:
+            return
+        self._last_heartbeat = now
+        try:
+            _atomic_write_text(Path(self.farm_root) / "heartbeat.txt", f"{now}\n", mode=None)
+        except OSError:
+            pass
+
     def start(self) -> None:
+        self._touch_root_heartbeat(force=True)
         with self._lock:
             slots = list(self._slots)
         for slot in slots:
@@ -695,6 +709,7 @@ class Farm:
             now = time.time()
             if now - self._last_publish >= 3.0:
                 self._last_publish = now
+                self._touch_root_heartbeat()
                 try:
                     self.hub.publish("farm", self.snapshot())
                 except Exception:

@@ -1797,6 +1797,123 @@ class PickRoomAndSessionFilterTest(unittest.TestCase):
         self.assertFalse(bot.session())
         self.assertEqual(store.get().get("status"), "waiting for room")
 
+    def test_strict_8p_only_rejects_16p_tf_and_picks_8p_tf(self) -> None:
+        cfg = types.SimpleNamespace(
+            strict_8p_only=True,
+            strict_tf_only=True,
+            max_room_size=8,
+            prefer_8p_rooms=True,
+            prefer_small_rooms=True,
+        )
+        bot = shell(cfg=cfg)
+        rooms_only_16p = [
+            {"gameId": "tf16", "name": "EEE/NT - vill win! TF", "playerCount": 14, "dayDiscussionDurationInMs": 10000},
+            {"gameId": "saym16", "name": "WW Say M 16p", "playerCount": 6, "roles": ["r"] * 16},
+            {"gameId": "nl14", "name": "vaness's game E", "playerCount": 3, "roles": ["r"] * 14, "dayDiscussionDurationInMs": 5000},
+        ]
+        self.assertIsNone(bot._pick_room(rooms_only_16p))
+
+        mixed = rooms_only_16p + [
+            {"gameId": "tf8", "name": "WW Say M 8p TF", "playerCount": 6, "roles": ["r"] * 8},
+        ]
+        picked = bot._pick_room(mixed)
+        self.assertIsNotNone(picked)
+        self.assertEqual(picked["gameId"], "tf8")
+
+    def test_lobby_exceeding_8_players_triggers_restart_in_strict_8p_mode(self) -> None:
+        from wvbot.game import GameState
+
+        state = GameState()
+        state.phase = "lobby"
+        restart_ev = threading.Event()
+        bot = shell(
+            cfg=types.SimpleNamespace(strict_8p_only=True, max_room_size=8, reflex_chat_enabled=False),
+            state=state,
+            store=StatusStore(),
+            _restart=restart_ev,
+            log_event=mock.MagicMock(),
+        )
+        bot._player_levels = lambda: []
+        sock = FakeGameSocket()
+
+        bot._on_game_event(
+            sock,
+            "players-and-equipped-items",
+            ([{"id": f"p{i}", "gridIdx": i, "level": 5} for i in range(9)],),
+        )
+        self.assertTrue(restart_ev.is_set())
+
+        # Also test dict payload shape and "settings" lobby phase.
+        state2 = GameState()
+        state2.phase = "settings"
+        restart_ev2 = threading.Event()
+        bot2 = shell(
+            cfg=types.SimpleNamespace(strict_8p_only=True, max_room_size=8, reflex_chat_enabled=False),
+            state=state2,
+            store=StatusStore(),
+            _restart=restart_ev2,
+            log_event=mock.MagicMock(),
+        )
+        bot2._player_levels = lambda: []
+        bot2._on_game_event(
+            sock,
+            "players-and-equipped-items",
+            ({"players": [{"id": f"q{i}", "gridIdx": i, "level": 5} for i in range(9)]},),
+        )
+        self.assertTrue(restart_ev2.is_set())
+
+    def test_stay_in_room_exits_when_match_exceeded_8_players(self) -> None:
+        from wvbot.game import GameState
+
+        state = GameState()
+        state.apply("game-started", {"role": {"id": "villager"}, "players": [{"id": i} for i in range(12)]})
+        cfg = types.SimpleNamespace(
+            fast_reconnect_enabled=False,
+            socket_join_delay_sec=0.0,
+            silence_timeout_sec=300.0,
+            claim_double_xp=False,
+            stay_in_room=True,
+            strict_8p_only=True,
+            stay_in_room_timeout_sec=0.5,
+            stay_in_room_max_game_duration_sec=150.0,
+            reflex_chat_enabled=False,
+        )
+        store = StatusStore()
+        bot = shell(
+            cfg=cfg,
+            store=store,
+            stop_event=threading.Event(),
+            _restart=threading.Event(),
+            _banned=threading.Event(),
+            _session_over=threading.Event(),
+            _acted_keys=set(),
+            state=state,
+            auth=types.SimpleNamespace(ensure_token=lambda: "tok"),
+            device_id="dev",
+            history=types.SimpleNamespace(record_game=lambda xp: None, get=lambda: {}),
+        )
+        bot.log_event = mock.MagicMock()
+        bot._read_profile = lambda: None
+        sockets: list[FakeGameSocket] = []
+        bot._create_game_socket = lambda token, url: (sockets.append(FakeGameSocket()) or sockets[-1])
+
+        thread = threading.Thread(
+            target=lambda: bot._play_game("tok", "room-12", "http://server"),
+            daemon=True,
+        )
+        thread.start()
+        for _ in range(50):
+            if sockets and sockets[0].emitted:
+                break
+            time.sleep(0.01)
+
+        sockets[0].simulate_event("game-over-awards-available", {"playerAward": {"awardedTotalXp": 30}})
+        thread.join(timeout=2.0)
+        self.assertFalse(thread.is_alive())
+        exit_emits = [e for e in sockets[0].emitted if e[0] == "mg:exit-game"]
+        self.assertEqual(len(exit_emits), 1)
+        self.assertEqual(store.get().get("status"), "waiting for room")
+
 
 class RewardsGatingAndSafetyTest(unittest.TestCase):
     def test_collect_rewards_gates_loot_boxes_on_open_loot_boxes_flag(self) -> None:

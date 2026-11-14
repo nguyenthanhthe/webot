@@ -313,12 +313,15 @@ class GameState:
         events do, so the bot learns the level of everybody in the room
         before the game begins.
         """
-        if not isinstance(data, dict):
+        if isinstance(data, list):
+            raw_players = data
+        elif isinstance(data, dict):
+            raw_players = data.get("players")
+            if not isinstance(raw_players, list):
+                single = data.get("player")
+                raw_players = [single] if isinstance(single, dict) else []
+        else:
             return
-        raw_players = data.get("players")
-        if not isinstance(raw_players, list):
-            single = data.get("player")
-            raw_players = [single] if isinstance(single, dict) else []
         for raw in raw_players:
             if not isinstance(raw, dict):
                 continue

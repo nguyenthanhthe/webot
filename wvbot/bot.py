@@ -170,6 +170,11 @@ class Bot:
         Only the bot holds a valid attestation, so the laptop asks the
         bot instead of the game server.  Read-only; nothing joins.
         """
+        # ponytail: ensure token is fresh so /api/rooms still works during long ban waits
+        try:
+            self.auth.ensure_token()
+        except Exception:  # noqa: BLE001
+            pass
         clean = "".join(c for c in str(language) if c.isalpha())[:8] or "en"
         base = GAME_URL_ASIA if host == "asia" else self.cfg.game_base_url
         url = f"{base}/api/public/game/custom?language={clean}"
@@ -366,7 +371,10 @@ class Bot:
         if not rooms:
             return None
 
+        strict_8p = bool(getattr(self.cfg, "strict_8p_only", False))
         cfg_max = self._safe_int(getattr(self.cfg, "max_room_size", 0), 0)
+        if strict_8p and (cfg_max <= 0 or cfg_max > 8):
+            cfg_max = 8
         available: list[dict[str, Any]] = []
         for room in rooms:
             count = self._safe_int(room.get("playerCount"), 0)
@@ -383,17 +391,27 @@ class Bot:
             return None
 
         def is_8p_room(room: dict[str, Any]) -> bool:
+            if self._safe_int(room.get("playerCount"), 0) >= 8:
+                return False
             name = GameApi.fold(GameApi._room_name(room))
+            if any(k in name for k in ("16p", "16 p", "16-p", "16player", "12p", "12 p")):
+                return False
             max_p = self._room_max_players(room)
             roles = room.get("roles")
             roles_count = len(roles) if isinstance(roles, list) else 0
-            if 0 < max_p <= 8:
-                return True
-            if 0 < roles_count <= 8:
+            if max_p > 8 or roles_count > 8:
+                return False
+            if 0 < max_p <= 8 or 0 < roles_count <= 8:
                 return True
             if any(k in name for k in ("8p", "8 p", "8-p", " 8 ", "8player", "vw8", "vw 8", "say m", "ww say", "m only")):
                 return True
             return False
+
+        # ponytail: enforce strict 8p filtering BEFORE fast_rooms so 16p TF rooms cannot bypass it
+        if strict_8p:
+            rooms = [r for r in rooms if is_8p_room(r)]
+            if not rooms:
+                return None
 
         def is_tf_room(room: dict[str, Any]) -> bool:
             """Time Flies (TF) rooms shorten day/night timers drastically for rapid XP farming."""
@@ -420,11 +438,6 @@ class Bot:
         # and human players roleplay or report bots for not playing standard games.
         if getattr(self.cfg, "strict_tf_only", False):
             return None
-
-        if getattr(self.cfg, "strict_8p_only", False):
-            rooms = [r for r in rooms if is_8p_room(r)]
-            if not rooms:
-                return None
 
         if len(rooms) == 1:
             return rooms[0]
@@ -552,7 +565,7 @@ class Bot:
                             "%H:%M:%S UTC", time.gmtime(self._banned_until)
                         ),
                     )
-                    self.stop_event.wait(min(wait + 5, 7200))
+                    self.stop_event.wait(min(wait + 5, 300))
                     if self.stop_event.is_set():
                         break
                     if time.time() < self._banned_until:
@@ -850,8 +863,13 @@ class Bot:
                         )
                     duration = max(0.0, time.time() - start_time)
                     stay_max = getattr(self.cfg, "stay_in_room_max_game_duration_sec", 150.0)
+                    over_8p = bool(
+                        getattr(self.cfg, "strict_8p_only", False)
+                        and len(self.state.players) > 8
+                    )
                     will_stay = bool(
                         getattr(self.cfg, "stay_in_room", False)
+                        and not over_8p
                         and (rematch_started or duration <= stay_max)
                     )
                     if will_stay:
@@ -881,7 +899,9 @@ class Bot:
                             if hasattr(self, "store")
                             else game_id
                         )
-                        if duration > stay_max:
+                        if over_8p:
+                            self.log_event("lobby", f"phòng '{room_label}' vượt quá 8 người ({len(self.state.players)}p) - rời phòng tìm phòng 8 người")
+                        elif duration > stay_max:
                             self.log_event("lobby", f"phòng '{room_label}' chậm (ván kéo dài {int(duration)}s > {int(stay_max)}s) - rời phòng tìm phòng TF/fast farm khác")
                         left_cleanly = True
                         break
@@ -1078,6 +1098,16 @@ class Bot:
                     self._handle_chat_reflex(sock, parse_payload(payload))
             if event in ("player-joined-and-equipped-items", "players-and-equipped-items"):
                 self.store.update(levels=self._player_levels())
+                if self.state.phase in ("lobby", "settings") and getattr(self.cfg, "strict_8p_only", False):
+                    max_lobby = min(8, self._safe_int(getattr(self.cfg, "max_room_size", 8), 8) or 8)
+                    if len(self.state.players) > max_lobby:
+                        restart_ev = getattr(self, "_restart", None)
+                        if restart_ev is not None and not restart_ev.is_set():
+                            self.log_event(
+                                "lobby",
+                                f"phòng vượt quá {max_lobby} người trong sảnh ({len(self.state.players)}p) - rời sảnh ngay trước khi bắt đầu",
+                            )
+                            restart_ev.set()
             if event in ("game-players-killed", "game-reconnect-set-players"):
                 self._update_alive()
                 if event == "game-reconnect-set-players":
