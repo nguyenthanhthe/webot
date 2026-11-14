@@ -160,8 +160,9 @@ class GameState:
         for player in self.players:
             if player.grid_idx >= 0 and (player.grid_idx + 1) == seat:
                 return player
-        if 1 <= seat <= len(self.players):
-            return self.players[seat - 1]
+        if self.players and all(p.grid_idx < 0 for p in self.players):
+            if 1 <= seat <= len(self.players):
+                return self.players[seat - 1]
         return None
 
     def own_seat(self) -> int | None:
@@ -169,9 +170,10 @@ class GameState:
         own = self.by_id(self.own_id())
         if own is not None and own.grid_idx >= 0:
             return own.grid_idx + 1
-        for idx, p in enumerate(self.players):
-            if p.id == self.own_id():
-                return idx + 1
+        if self.players and all(p.grid_idx < 0 for p in self.players):
+            for idx, p in enumerate(self.players):
+                if p.id == self.own_id():
+                    return idx + 1
         return None
 
     def _check_wolf_claim(self, data: dict[str, Any]) -> None:
@@ -182,7 +184,13 @@ class GameState:
         author_id = data.get("authorId")
         author = self.by_id(author_id) if author_id is not None else None
         log.info("chat from %s: %r", author.username if author else author_id, msg)
+        if "?" in msg:
+            return
+        if author is not None and (not author.is_alive or author.id in self.dead_ids):
+            return
         clean = msg.lower().strip()
+        if re.search(r"\b(?:not|no|isn't|isnt|ain't|aint|never)\b", clean):
+            return
         clean_stem = clean.strip(" .!?,:;")
         # In fast-farm rooms, werewolves claim simply by saying 'm' or 'w' or 'ww'
         if clean_stem in (
@@ -192,7 +200,7 @@ class GameState:
             "im evil", "me evil", "i'm wolf", "i'm w", "i'm ww", "i'm m",
         ):
             if author_id is not None and author_id != self.own_id():
-                if author and author.is_alive:
+                if author and author.is_alive and author.id not in self.dead_ids:
                     self.claimed_wolf_id = author.id
                     self.claimed_wolf_seat = (author.grid_idx + 1) if author.grid_idx >= 0 else None
                     log.info("author wolf claim registered: player %s (%s) seat %s msg=%r", author.username, author.id, self.claimed_wolf_seat, msg)
@@ -203,7 +211,14 @@ class GameState:
             try:
                 seat = int(seat_str)
                 claimed_player = self.player_by_seat(seat)
-                if claimed_player and claimed_player.is_alive:
+                if claimed_player and claimed_player.is_alive and claimed_player.id not in self.dead_ids:
+                    # Do not let another player's chat overwrite claimed_wolf_id with own_id when bot is not a wolf.
+                    if (
+                        claimed_player.id == self.own_id()
+                        and not self.is_wolf
+                        and author_id != self.own_id()
+                    ):
+                        return
                     self.claimed_wolf_id = claimed_player.id
                     self.claimed_wolf_seat = seat
                     log.info("wolf claim registered: seat %d -> player %s (%s)", seat, claimed_player.username, claimed_player.id)
@@ -251,10 +266,14 @@ class GameState:
             self._on_started(data)
         elif event == "game-settings-changed":
             self.phase = "settings"
+        elif event == "game-day-started":
+            self.phase = "day"
         elif event == "game-day-voting-started":
             self.phase = "day-voting"
+            self.day_votes = {}
         elif event == "game-night-started":
             self.phase = "night"
+            self.night_votes = {}
         elif event == "game-players-killed":
             self._on_killed(data)
         elif event == "game-werewolves-set-roles":
@@ -336,8 +355,12 @@ class GameState:
         self.claimed_wolf_seat = None
         self.day_votes = {}
         self.night_votes = {}
+        self.messages = []
         self.lover_id = None
         self.last_award = {}
+        self.role_id = ""
+        self.role_name = ""
+        self.role_team = ""
         role = data.get("role")
         if isinstance(role, dict):
             self.role_id = str(role.get("id") or role.get("_id") or "")
@@ -347,8 +370,15 @@ class GameState:
             self.role_id = role
         players = data.get("players")
         if isinstance(players, list):
-            parsed = [Player.from_object(p) for p in players]
-            self.players = [p for p in parsed if p]
+            known_levels = {p.id: p.level for p in self.players if p.level}
+            parsed = []
+            for raw_p in players:
+                player = Player.from_object(raw_p)
+                if player is not None:
+                    if not player.level and player.id in known_levels:
+                        player.level = known_levels[player.id]
+                    parsed.append(player)
+            self.players = parsed
         log.info(
             "game started: role=%s team=%s players=%d",
             self.role_id or "?",
@@ -370,12 +400,22 @@ class GameState:
                 single = data.get("playerId") or data.get("id")
                 if single is not None:
                     ids = [single]
-        for pid in ids:
+        for item in ids:
+            pid = (
+                item.get("id") or item.get("playerId") or item.get("_id")
+                if isinstance(item, dict)
+                else item
+            )
+            if pid is None:
+                continue
             if pid not in self.dead_ids:
                 self.dead_ids.append(pid)
             player = self.by_id(pid)
             if player:
                 player.is_alive = False
+            if pid == self.claimed_wolf_id:
+                self.claimed_wolf_id = None
+                self.claimed_wolf_seat = None
 
     def _on_wolf_roles(self, data: Any) -> None:
         if not isinstance(data, dict):
@@ -411,8 +451,12 @@ class GameState:
             alive = info.get("isAlive")
             if alive is not None:
                 player.is_alive = bool(alive)
-                if not alive and pid not in self.dead_ids:
-                    self.dead_ids.append(pid)
+                if not alive:
+                    if pid not in self.dead_ids:
+                        self.dead_ids.append(pid)
+                    if pid == self.claimed_wolf_id:
+                        self.claimed_wolf_id = None
+                        self.claimed_wolf_seat = None
 
     def own_id(self) -> Any:
         return getattr(self, "_own_id", None)
@@ -463,7 +507,7 @@ class Policy:
                 if player.username and player.username.lower() in lowered:
                     counts[player.id] = counts.get(player.id, 0) + 1
                     continue
-                if player.grid_idx is not None:
+                if player.grid_idx >= 0:
                     seat_num = str(player.grid_idx + 1)
                     seat_re = (
                         r"\b(?:vote|go|on|sus|push)\s+" + seat_num + r"\b|"
@@ -477,11 +521,12 @@ class Policy:
         alive = state.alive
         if not alive:
             return None
+        dead_ids = getattr(state, "dead_ids", ())
         # Claimed wolf from chat has absolute highest priority for voting!
         claimed_id = getattr(state, "claimed_wolf_id", None)
         if claimed_id is not None:
             claimed = state.by_id(claimed_id)
-            if claimed and claimed.is_alive and claimed.id != state.own_id():
+            if claimed and claimed.is_alive and claimed.id not in dead_ids and claimed.id != state.own_id():
                 return claimed.id
             if claimed_id == state.own_id():
                 return None
@@ -492,7 +537,7 @@ class Policy:
                 if not target_id or target_id == state.own_id():
                     continue
                 p = state.by_id(target_id)
-                if p and getattr(p, "is_alive", True) and target_id not in state.dead_ids:
+                if p and getattr(p, "is_alive", True) and target_id not in dead_ids:
                     tally[target_id] = tally.get(target_id, 0) + 1
             if tally:
                 return max(tally.items(), key=lambda item: item[1])[0]
@@ -514,7 +559,7 @@ class Policy:
             p
             for p in state.alive
             if p.id != state.own_id()
-            and p.role.lower() not in WOLF_TEAMS
+            and p.role.upper() not in WOLF_TEAMS
             and "wolf" not in p.role.lower()
             and "werewolf" not in p.role.lower()
             and p.team.upper() not in WOLF_TEAMS
@@ -554,7 +599,7 @@ class Policy:
             for p in state.players
             if (not p.is_alive or p.id in state.dead_ids)
             and p.id != state.own_id()
-            and p.role.lower() not in WOLF_TEAMS
+            and p.role.upper() not in WOLF_TEAMS
             and "wolf" not in p.role.lower()
             and "werewolf" not in p.role.lower()
             and p.team.upper() not in WOLF_TEAMS
@@ -586,11 +631,12 @@ class Policy:
         2. If a living player is confirmed wolf by role/team, shoot them.
         3. If safe_mode is False, fall back to accusations or day votes.
         """
+        dead_ids = getattr(state, "dead_ids", ())
         # 1. Claimed wolf from chat has absolute highest priority!
         claimed_id = getattr(state, "claimed_wolf_id", None)
         if claimed_id is not None:
             claimed = state.by_id(claimed_id)
-            if claimed and claimed.is_alive and claimed.id != state.own_id():
+            if claimed and claimed.is_alive and claimed.id not in dead_ids and claimed.id != state.own_id():
                 return claimed.id
 
         # 2. Known wolves
@@ -600,7 +646,7 @@ class Policy:
             if p.id != state.own_id()
             and (
                 p.team.upper() in WOLF_TEAMS
-                or p.role.lower() in WOLF_TEAMS
+                or p.role.upper() in WOLF_TEAMS
                 or "wolf" in p.role.lower()
                 or "werewolf" in p.role.lower()
             )
@@ -617,6 +663,9 @@ class Policy:
             return None
 
         for value in state.day_votes.values():
-            if value and value != state.own_id():
+            if not value or value == state.own_id():
+                continue
+            p = state.by_id(value)
+            if p and getattr(p, "is_alive", True) and value not in dead_ids:
                 return value
         return None

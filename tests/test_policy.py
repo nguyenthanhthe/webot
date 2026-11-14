@@ -281,6 +281,53 @@ class KillerTargetTest(unittest.TestCase):
         self.assertEqual(state.claimed_wolf_id, 1)
         self.assertIsNone(policy.vote_target(state))
 
+    def test_accusation_counts_ignores_negative_grid_idx_zero_mention(self) -> None:
+        policy = Policy()
+        state = state_with(
+            [
+                {"id": 1, "username": "me"},
+                {"id": 2, "username": "bob"},
+            ]
+        )
+        # Default grid_idx is -1, so seat number 0 must not falsely accuse bob.
+        state.messages.append({"authorId": 1, "msg": "vote 0"})
+        self.assertEqual(policy._accusation_counts(state), {})
+
+    def test_killer_target_safe_mode_false_ignores_dead_day_vote_targets(self) -> None:
+        policy = Policy()
+        state = state_with(
+            [
+                {"id": 1, "username": "me", "isAlive": True},
+                {"id": 2, "username": "dead_guy", "isAlive": False},
+                {"id": 3, "username": "bob", "isAlive": True},
+            ],
+            own_id=1,
+        )
+        state.dead_ids = [2]
+        state.day_votes = {1: 2, 3: 2}
+        self.assertIsNone(policy.killer_target(state, safe_mode=False))
+        state.day_votes = {1: 2, 4: 3}
+        self.assertEqual(policy.killer_target(state, safe_mode=False), 3)
+
+    def test_wolf_teams_uppercase_role_fallback_matching(self) -> None:
+        policy = Policy()
+        state = state_with(
+            [
+                {"id": 1, "username": "me", "team": ""},
+                {"id": 2, "username": "evil_guy", "role": "EVIL", "team": ""},
+                {"id": 3, "username": "vill", "role": "VILLAGE", "team": ""},
+            ],
+            own_id=1,
+        )
+        # kill_target skips targets whose role uppercases into WOLF_TEAMS (EVIL)
+        self.assertEqual(policy.kill_target(state), 3)
+        # killer_target in safe mode targets EVIL role
+        self.assertEqual(policy.killer_target(state, safe_mode=True), 2)
+        # revive_target skips EVIL dead players and revives VILLAGE dead players
+        state.players[1].is_alive = False
+        state.players[2].is_alive = False
+        self.assertEqual(policy.revive_target(state), 3)
+
 
 if __name__ == "__main__":
     unittest.main()
