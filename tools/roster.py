@@ -334,14 +334,13 @@ def farm_status(url: str = DEFAULT_URL, token: str = "") -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    common = argparse.ArgumentParser(add_help=False)
+    common = argparse.ArgumentParser(add_help=False, argument_default=argparse.SUPPRESS)
     common.add_argument(
         "--url",
-        default=os.environ.get("WV_DASHBOARD_URL", DEFAULT_URL),
         help="Running dashboard base URL (default: http://127.0.0.1:8787)",
     )
-    common.add_argument("--token", default=None, help="Dashboard auth token")
-    common.add_argument("--state-dir", default=None, help="Override bot state directory")
+    common.add_argument("--token", help="Dashboard auth token")
+    common.add_argument("--state-dir", help="Override bot state directory")
     common.add_argument(
         "--offline",
         action="store_true",
@@ -357,7 +356,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("list", parents=[common], help="List all accounts in the farm roster")
     add_parser = subparsers.add_parser("add", parents=[common], help="Add an account to the roster")
     add_parser.add_argument("name", help="Name of the account")
-    add_parser.add_argument("--refresh-token", help="Firebase refresh token")
+    add_parser.add_argument("--refresh-token", default=None, help="Firebase refresh token")
 
     rm_parser = subparsers.add_parser("remove", parents=[common], help="Remove an account from the roster")
     rm_parser.add_argument("name", help="Name of the account to remove")
@@ -373,24 +372,29 @@ def main(argv: list[str] | None = None) -> int:
         parser.print_help()
         return 0
 
-    sdir = resolve_state_dir(args.state_dir)
-    token = resolve_token(args.token, sdir)
+    url = getattr(args, "url", os.environ.get("WV_DASHBOARD_URL", DEFAULT_URL))
+    raw_state_dir = getattr(args, "state_dir", None)
+    raw_token = getattr(args, "token", None)
+    offline = bool(getattr(args, "offline", False))
+
+    sdir = resolve_state_dir(raw_state_dir)
+    token = resolve_token(raw_token, sdir)
 
     if args.subcommand == "list":
-        return list_accounts(state_dir=sdir, url=args.url, token=token, offline=args.offline)
+        return list_accounts(state_dir=sdir, url=url, token=token, offline=offline)
     if args.subcommand == "add":
         return add_account(
             args.name,
             args.refresh_token,
             state_dir=sdir,
-            url=args.url,
+            url=url,
             token=token,
-            offline=args.offline,
+            offline=offline,
         )
     if args.subcommand == "remove":
-        return remove_account(args.name, state_dir=sdir, url=args.url, token=token, offline=args.offline)
+        return remove_account(args.name, state_dir=sdir, url=url, token=token, offline=offline)
     if args.subcommand == "status":
-        return farm_status(url=args.url, token=token)
+        return farm_status(url=url, token=token)
 
     parser.print_help()
     return 0

@@ -225,6 +225,20 @@ class RosterToolTests(unittest.TestCase):
                 self.end_headers()
                 self.wfile.write(json.dumps({"accounts": [{"name": "alpha", "ready": True}]}).encode())
 
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+                calls.append(("POST", self.path, self.headers.get("Authorization")))
+                if self.headers.get("Authorization") != "Bearer good-tok":
+                    self.send_response(401)
+                    self.end_headers()
+                    self.wfile.write(b'{"error":"unauthorized"}')
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"ok": True, "name": body.get("name")}).encode())
+
         srv = HTTPServer(("127.0.0.1", 0), Handler)
         t = threading.Thread(target=srv.serve_forever, daemon=True)
         t.start()
@@ -237,9 +251,36 @@ class RosterToolTests(unittest.TestCase):
                 self.assertEqual(rc, 0)
                 self.assertIn("alpha", buf.getvalue())
 
+                # Global flags before subcommand must not be overwritten by subparser defaults.
+                buf_before = io.StringIO()
+                with redirect_stdout(buf_before):
+                    rc_add = roster.main(
+                        [
+                            "--url",
+                            url,
+                            "--token",
+                            "good-tok",
+                            "--state-dir",
+                            tmp,
+                            "add",
+                            "gamma",
+                            "--refresh-token",
+                            "rt-gamma",
+                        ]
+                    )
+                self.assertEqual(rc_add, 0)
+                self.assertIn("gamma", buf_before.getvalue())
+                self.assertIn(("POST", "/api/accounts", "Bearer good-tok"), calls)
+
+                buf_off = io.StringIO()
+                with redirect_stdout(buf_off):
+                    rc_off = roster.main(["--offline", "--state-dir", tmp, "list"])
+                self.assertEqual(rc_off, 0)
+                self.assertIn("single account", buf_off.getvalue())
+
                 # 401 from live server must fail instead of reading local disk.
                 with mock.patch("sys.stderr", new_callable=io.StringIO):
-                    rc_unauth = roster.main(["list", "--url", url, "--token", "wrong", "--state-dir", tmp])
+                    rc_unauth = roster.main(["--url", url, "--token", "wrong", "--state-dir", tmp, "list"])
                 self.assertEqual(rc_unauth, 1)
         finally:
             srv.shutdown()
