@@ -1346,15 +1346,18 @@ class BotInitAndLifecycleTest(unittest.TestCase):
 
     def test_run_shuts_down_dashboard_in_finally_and_skips_rewards_on_stop(self) -> None:
         server = mock.MagicMock()
+        acct_dir = Path("acct-state")
         bot = shell(
             cfg=types.SimpleNamespace(
                 dashboard_host="127.0.0.1",
                 dashboard_port=0,
+                dashboard_token="secret-dash",
                 reconnect_delay_sec=1.0,
                 reconnect_delay_max_sec=5.0,
                 bio_break_enabled=False,
                 turbo_mode=True,
             ),
+            account_dir=acct_dir,
             start_web_dashboard=True,
             store=StatusStore(),
             hub=None,
@@ -1385,9 +1388,12 @@ class BotInitAndLifecycleTest(unittest.TestCase):
 
         bot.session = stop_in_session
 
-        with mock.patch.object(bot_module, "start_dashboard", return_value=server):
+        with mock.patch.object(bot_module, "start_dashboard", return_value=server) as mock_start:
             bot.run()
 
+        self.assertEqual(mock_start.call_count, 1)
+        self.assertEqual(mock_start.call_args.kwargs.get("token"), "secret-dash")
+        self.assertEqual(mock_start.call_args.kwargs.get("state_dir"), acct_dir)
         server.shutdown.assert_called_once_with()
         server.server_close.assert_called_once_with()
         self.assertEqual(reward_calls, [])
