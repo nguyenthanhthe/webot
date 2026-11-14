@@ -12,9 +12,9 @@ come from the official web client (``static/js/main.*.js``):
 from __future__ import annotations
 
 import logging
-import re
 import unicodedata
 from typing import Any, Callable
+from urllib.parse import quote
 
 from .config import CORE_URL, Config
 from .http_client import HttpClient
@@ -50,7 +50,7 @@ class GameApi:
     # ------------------------------------------------------------------
     def list_custom_games(self, language: str | None = None) -> list[dict[str, Any]]:
         """Return the open custom-game rooms for a language."""
-        lang = language or self.cfg.language
+        lang = quote(str(language or self.cfg.language), safe="")
         url = f"{self.cfg.game_base_url}/api/public/game/custom?language={lang}"
         data = self.http.request("GET", url, headers=self.auth_headers)
         if isinstance(data, dict):
@@ -126,7 +126,7 @@ class GameApi:
         return found
 
     @staticmethod
-    def _matches(name: str, wanted: list[str], tokens: list[str] | None = None) -> bool:
+    def _matches(name: str, wanted: list[str]) -> bool:
         """True when the room name carries any of the wanted patterns."""
         for target in wanted:
             if target in ("*", "all", "any"):
@@ -140,9 +140,10 @@ class GameApi:
 
     # ------------------------------------------------------------------
     def check_password_presence(self, game_id: Any) -> bool:
+        quoted_id = quote(str(game_id), safe="")
         url = (
             f"{self.cfg.game_base_url}/api/public/game/customGames/"
-            f"checkPasswordPresence?gameId={game_id}"
+            f"checkPasswordPresence?gameId={quoted_id}"
         )
         data = self.http.request("GET", url, headers=self.auth_headers)
         if isinstance(data, dict):
@@ -152,14 +153,12 @@ class GameApi:
         return False
 
     def get_game_settings(self, game_id: Any, locale: str = "en") -> Any:
+        quoted_id = quote(str(game_id), safe="")
+        quoted_locale = quote(str(locale), safe="")
         url = (
             f"{self.cfg.game_base_url}/api/public/game/custom/settings"
-            f"?gameId={game_id}&locale={locale}"
+            f"?gameId={quoted_id}&locale={quoted_locale}"
         )
-        return self.http.request("GET", url, headers=self.auth_headers)
-
-    def get_me(self) -> Any:
-        url = f"{CORE_URL}/players/meAndCheckAppVersion"
         return self.http.request("GET", url, headers=self.auth_headers)
 
     def get_own_player_id(self, device_id: str = "") -> Any:
@@ -213,20 +212,3 @@ class GameApi:
             if isinstance(player, dict):
                 return player
         return {}
-
-
-def looks_like_room_name(blob: Any, needle: str) -> bool:
-    """Fallback room matcher that scans a raw JSON blob for the name."""
-    if not isinstance(blob, (dict, list)):
-        return False
-    text = json_dumps(blob)
-    return re.search(re.escape(needle), text, re.IGNORECASE) is not None
-
-
-def json_dumps(value: Any) -> str:
-    import json
-
-    try:
-        return json.dumps(value, ensure_ascii=False)
-    except (TypeError, ValueError):
-        return str(value)

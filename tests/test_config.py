@@ -9,7 +9,15 @@ from pathlib import Path
 from unittest import mock
 
 from wvbot import config as config_mod
-from wvbot.config import Config, _coerce, load_config, state_path
+from wvbot.config import (
+    CONFIG_FIELDS,
+    Config,
+    _coerce,
+    apply_overrides,
+    get_state_dir,
+    load_config,
+    state_path,
+)
 
 
 class StatePathTest(unittest.TestCase):
@@ -40,6 +48,25 @@ class StatePathTest(unittest.TestCase):
         path = state_path("state.json", base=custom_base)
         self.assertEqual(path, custom_base / "state.json")
 
+    def test_state_dir_env_and_monkeypatch_precedence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_env:
+            env_dir = Path(tmp_env) / "env-state"
+            with mock.patch.dict(os.environ, {"WV_BOT_STATE_DIR": str(env_dir)}, clear=False):
+                self.assertEqual(get_state_dir(), env_dir)
+                self.assertEqual(state_path("state.json"), env_dir / "state.json")
+
+                override_dir = Path(tmp_env) / "monkey-state"
+                with mock.patch.object(config_mod, "STATE_DIR", override_dir):
+                    self.assertEqual(get_state_dir(), override_dir)
+                    self.assertEqual(state_path("state.json"), override_dir / "state.json")
+
+        with tempfile.TemporaryDirectory() as tmp_env:
+            state_dir_env = Path(tmp_env) / "docker-data"
+            clean_env = {k: v for k, v in os.environ.items() if k != "WV_BOT_STATE_DIR"}
+            clean_env["STATE_DIR"] = str(state_dir_env)
+            with mock.patch.dict(os.environ, clean_env, clear=True):
+                self.assertEqual(get_state_dir(), state_dir_env)
+
 
 class CoerceTest(unittest.TestCase):
     def test_bool(self) -> None:
@@ -50,9 +77,17 @@ class CoerceTest(unittest.TestCase):
     def test_int(self) -> None:
         self.assertEqual(_coerce(1, "5"), 5)
         self.assertEqual(_coerce(1, "5.0"), 5)
+        self.assertEqual(_coerce(3, ""), 3)
+
+    def test_optional_int(self) -> None:
+        self.assertIsNone(_coerce(4, "", int | None))
+        self.assertIsNone(_coerce(4, "none", int | None))
+        self.assertIsNone(_coerce(4, "NULL", int | None))
+        self.assertEqual(_coerce(None, "6", int | None), 6)
 
     def test_float(self) -> None:
         self.assertAlmostEqual(_coerce(1.0, "2.5"), 2.5)
+        self.assertAlmostEqual(_coerce(1.5, ""), 1.5)
 
     def test_list_splits_on_commas(self) -> None:
         self.assertEqual(_coerce(["a"], "alpha, beta ,"), ["alpha", "beta"])
@@ -76,6 +111,8 @@ class LoadConfigTest(unittest.TestCase):
         cfg = load_config("missing-config.json")
         self.assertEqual(cfg.joins_per_hour, 12)
         self.assertEqual(cfg.room_names, ["vill win"])
+        self.assertEqual(cfg.dashboard_host, "127.0.0.1")
+        self.assertEqual(cfg.dashboard_token, "")
         self.assertTrue(cfg.fast_reconnect_enabled)
         self.assertEqual(cfg.fast_reconnect_max_attempts, 3)
         self.assertEqual(cfg.fast_reconnect_delay_sec, 3.0)
@@ -118,12 +155,58 @@ class LoadConfigTest(unittest.TestCase):
         self.assertEqual(cfg.refresh_token, "token-from-file")
 
     def test_to_dict_masks_the_secrets(self) -> None:
-        cfg = Config(password="pw", refresh_token="rt", cf_jwt="jwt")
+        cfg = Config(password="pw", refresh_token="rt", cf_jwt="jwt", dashboard_token="dash")
         data = cfg.to_dict()
         self.assertEqual(data["password"], "***")
         self.assertEqual(data["refresh_token"], "***")
         self.assertEqual(data["cf_jwt"], "***")
+        self.assertEqual(data["dashboard_token"], "***")
         self.assertEqual(data["email"], "")
+
+    def test_apply_overrides_ignores_methods_and_properties(self) -> None:
+        cfg = Config()
+        apply_overrides(
+            cfg,
+            {
+                "joins_per_hour": 3,
+                "to_dict": "pwned",
+                "game_base_url": "https://evil.invalid",
+                "unknown": 123,
+            },
+        )
+        self.assertEqual(cfg.joins_per_hour, 3)
+        self.assertTrue(callable(cfg.to_dict))
+        self.assertEqual(cfg.game_base_url, config_mod.GAME_URL)
+        self.assertNotIn("to_dict", CONFIG_FIELDS)
+        self.assertNotIn("game_base_url", CONFIG_FIELDS)
+
+    def test_optional_int_and_dashboard_token_env_overrides(self) -> None:
+        (self.state_dir / "config.json").write_text(
+            '{"daily_restart_hour": null, "to_dict": "bad"}',
+            encoding="utf-8",
+        )
+        with mock.patch.dict(
+            os.environ,
+            {"WV_BOT_DAILY_RESTART_HOUR": "7", "WV_DASHBOARD_TOKEN": "fallback-tok"},
+            clear=False,
+        ):
+            cfg = load_config()
+        self.assertEqual(cfg.daily_restart_hour, 7)
+        self.assertEqual(cfg.dashboard_token, "fallback-tok")
+        self.assertTrue(callable(cfg.to_dict))
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "WV_BOT_DAILY_RESTART_HOUR": "none",
+                "WV_DASHBOARD_TOKEN": "fallback-tok",
+                "WV_BOT_DASHBOARD_TOKEN": "primary-tok",
+            },
+            clear=False,
+        ):
+            cfg2 = load_config()
+        self.assertIsNone(cfg2.daily_restart_hour)
+        self.assertEqual(cfg2.dashboard_token, "primary-tok")
 
     def test_game_base_url_follows_the_asia_flag(self) -> None:
         cfg = Config()

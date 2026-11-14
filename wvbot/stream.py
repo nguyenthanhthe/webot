@@ -11,12 +11,9 @@ bounded and drops the oldest frames when the reader falls behind.
 from __future__ import annotations
 
 import json
-import logging
 import queue
 import threading
 from typing import Any
-
-log = logging.getLogger("wvbot.stream")
 
 # Frames a client may fall behind by before the oldest are dropped.
 QUEUE_DEPTH = 200
@@ -42,9 +39,11 @@ class StreamHub:
 
     def publish(self, kind: str, data: Any) -> None:
         """Send one frame to everyone; a dead or slow client is skipped."""
-        frame = (kind, json.dumps(data, ensure_ascii=False))
         with self._lock:
+            if not self._clients:
+                return
             clients = list(self._clients)
+        frame = (kind, json.dumps(data, ensure_ascii=False))
         for client in clients:
             try:
                 client.put_nowait(frame)
@@ -61,21 +60,7 @@ class StreamHub:
         with self._lock:
             return len(self._clients)
 
+    subscriber_count = viewer_count
 
-def sse_frames(client: queue.Queue[tuple[str, str]], stop: threading.Event):
-    """Yield the wire frames for one subscription until told to stop.
 
-    A keepalive comment every few frames keeps proxies from closing an
-    idle stream.
-    """
-    ticks = 0
-    while not stop.is_set():
-        try:
-            kind, data = client.get(timeout=1.0)
-        except queue.Empty:
-            ticks += 1
-            yield ": keepalive\n\n"
-            continue
-        ticks = 0
-        yield f"event: {kind}\ndata: {data}\n\n"
-        del ticks
+EventHub = StreamHub

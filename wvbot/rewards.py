@@ -17,22 +17,38 @@ a claim gives gold, so the operator has to ask for it.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Callable
 
+from .config import CORE_URL
 from .http_client import HttpClient
 
 log = logging.getLogger("wvbot.rewards")
-
-CORE_URL = "https://core.api-wolvesville.com"
 
 
 class Rewards:
     """Claims the daily rewards and spins the golden wheel."""
 
-    def __init__(self, cfg: Any, http: HttpClient, auth_headers: dict[str, str] | None = None):
+    def __init__(
+        self,
+        cfg: Any,
+        http: HttpClient,
+        auth_headers: dict[str, str] | Callable[[], dict[str, str]] | None = None,
+    ):
         self.cfg = cfg
         self.http = http
-        self.auth_headers = dict(auth_headers or {})
+        self._auth_headers = auth_headers
+
+    @property
+    def auth_headers(self) -> dict[str, str]:
+        if callable(self._auth_headers):
+            return self._auth_headers()
+        return dict(self._auth_headers or {})
+
+    @auth_headers.setter
+    def auth_headers(
+        self, value: dict[str, str] | Callable[[], dict[str, str]] | None
+    ) -> None:
+        self._auth_headers = value
 
     # ------------------------------------------------------------------
     def golden_wheel_conditions(self) -> dict[str, Any]:
@@ -117,26 +133,3 @@ class Rewards:
             if isinstance(items, list):
                 return items
         return []
-
-    def xp_boosters(self) -> list[dict[str, Any]]:
-        """The XP boosters in the inventory and how many are left."""
-        inventory = self.inventory()
-        boosters = inventory.get("ownedActivatableXpBoosters")
-        if not isinstance(boosters, list):
-            return []
-        return [b for b in boosters if isinstance(b, dict) and int(b.get("count") or 0) > 0]
-
-    # ------------------------------------------------------------------
-    def describe_daily(self) -> str:
-        """A short summary of the daily ladder, for the log."""
-        rewards = self.daily_rewards()
-        if not rewards:
-            return "no daily rewards"
-        parts: list[str] = []
-        for reward in rewards:
-            kind = str(reward.get("type") or "?")
-            amount = reward.get("amount")
-            claimed = bool(reward.get("claimed"))
-            mark = "claimed" if claimed else "open"
-            parts.append(f"{kind}x{amount} ({mark})")
-        return ", ".join(parts)

@@ -12,6 +12,7 @@ import os
 import socket
 import ssl
 import struct
+import threading
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -47,6 +48,7 @@ class WebSocket:
         self._sock: socket.socket | None = None
         self._buffer = b""
         self.closed = False
+        self._send_lock = threading.Lock()
         # A message the peer sent in several frames arrives here until
         # the last fragment carries it.
         self._fragments: list[bytes] | None = None
@@ -64,34 +66,48 @@ class WebSocket:
             path += "?" + parts.query
 
         raw = socket.create_connection((host, port), timeout=self.timeout)
-        if parts.scheme == "wss":
-            context = ssl.create_default_context()
-            raw = context.wrap_socket(raw, server_hostname=host)
-        raw.settimeout(self.timeout)
-        self._sock = raw
+        sock: socket.socket = raw
+        try:
+            if parts.scheme == "wss":
+                context = ssl.create_default_context()
+                sock = context.wrap_socket(raw, server_hostname=host)
+            sock.settimeout(self.timeout)
+            self._sock = sock
 
-        key = base64.b64encode(os.urandom(16)).decode()
-        request = [
-            f"GET {path} HTTP/1.1",
-            f"Host: {host}",
-            "Upgrade: websocket",
-            "Connection: Upgrade",
-            f"Sec-WebSocket-Key: {key}",
-            "Sec-WebSocket-Version: 13",
-            f"User-Agent: {self.user_agent}",
-        ]
-        request.extend(f"{k}: {v}" for k, v in self.extra_headers.items())
-        request.extend(["", ""])
-        raw.sendall("\r\n".join(request).encode())
+            key = base64.b64encode(os.urandom(16)).decode()
+            request = [
+                f"GET {path} HTTP/1.1",
+                f"Host: {host}",
+                "Upgrade: websocket",
+                "Connection: Upgrade",
+                f"Sec-WebSocket-Key: {key}",
+                "Sec-WebSocket-Version: 13",
+                f"User-Agent: {self.user_agent}",
+            ]
+            request.extend(f"{k}: {v}" for k, v in self.extra_headers.items())
+            request.extend(["", ""])
+            sock.sendall("\r\n".join(request).encode())
 
-        header = self._read_until(b"\r\n\r\n")
-        status_line = header.split(b"\r\n", 1)[0].decode("latin1", "replace")
-        if "101" not in status_line:
-            raise WebSocketError(f"handshake failed: {status_line}")
-        # The server may have sent frames right after the handshake; keep
-        # whatever was read past the header.
-        _, _, rest = header.partition(b"\r\n\r\n")
-        self._buffer = rest
+            header = self._read_until(b"\r\n\r\n")
+            status_line = header.split(b"\r\n", 1)[0].decode("latin1", "replace")
+            status_parts = status_line.split(None, 2)
+            if (
+                len(status_parts) < 2
+                or not status_parts[0].startswith("HTTP/")
+                or status_parts[1] != "101"
+            ):
+                raise WebSocketError(f"handshake failed: {status_line}")
+            # The server may have sent frames right after the handshake; keep
+            # whatever was read past the header.
+            _, _, rest = header.partition(b"\r\n\r\n")
+            self._buffer = rest
+        except Exception:
+            self._sock = None
+            try:
+                sock.close()
+            except OSError:
+                pass
+            raise
 
     # ------------------------------------------------------------------
     def _read_until(self, marker: bytes) -> bytes:
@@ -118,8 +134,9 @@ class WebSocket:
         out, self._buffer = self._buffer[:count], self._buffer[count:]
         return out
 
-    def _send_frame(self, opcode: int, payload: bytes) -> None:
-        assert self._sock is not None
+    def _send_frame_locked(self, opcode: int, payload: bytes) -> None:
+        if self._sock is None:
+            raise WebSocketError("socket is not connected")
         header = bytearray()
         header.append(0x80 | opcode)
         length = len(payload)
@@ -136,6 +153,12 @@ class WebSocket:
         header.extend(mask)
         masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
         self._sock.sendall(bytes(header) + masked)
+
+    def _send_frame(self, opcode: int, payload: bytes) -> None:
+        with self._send_lock:
+            if self.closed:
+                raise WebSocketError("socket is closed")
+            self._send_frame_locked(opcode, payload)
 
     # ------------------------------------------------------------------
     def send_text(self, text: str) -> None:
@@ -171,12 +194,15 @@ class WebSocket:
             if opcode == OPCODE_PONG:
                 continue
             if opcode in (OPCODE_TEXT, OPCODE_CONT):
-                if opcode == OPCODE_TEXT and fin:
-                    # The common case: one frame, whole message.
-                    return payload.decode("utf-8", "replace")
+                if self._fragments is not None and opcode != OPCODE_CONT:
+                    # Interleaving a new data frame before FIN completes is illegal.
+                    raise WebSocketError("unexpected data frame during fragmented message")
                 if self._fragments is None and opcode == OPCODE_CONT:
                     # A continuation without a start is a protocol error.
                     raise WebSocketError("continuation frame without a start")
+                if opcode == OPCODE_TEXT and fin:
+                    # The common case: one frame, whole message.
+                    return payload.decode("utf-8", "replace")
                 self._fragments = [] if self._fragments is None else self._fragments
                 self._fragments.append(payload)
                 if sum(len(part) for part in self._fragments) > MAX_MESSAGE_BYTES:
@@ -189,18 +215,21 @@ class WebSocket:
             # binary frames are not used by the game protocol
 
     def close(self) -> None:
-        if self.closed:
-            return
-        self.closed = True
-        try:
-            self._send_frame(OPCODE_CLOSE, b"\x03\xe8")
-        except Exception:  # noqa: BLE001 - best effort
-            pass
-        try:
-            if self._sock is not None:
-                self._sock.close()
-        except Exception:  # noqa: BLE001
-            pass
+        with self._send_lock:
+            if self.closed:
+                return
+            self.closed = True
+            sock = self._sock
+            if sock is not None:
+                try:
+                    self._send_frame_locked(OPCODE_CLOSE, b"\x03\xe8")
+                except Exception:  # noqa: BLE001 - best effort
+                    pass
+                try:
+                    sock.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                self._sock = None
 
     def __enter__(self) -> "WebSocket":
         self.connect()

@@ -20,7 +20,11 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
+import secrets
+import threading
 import time
+from pathlib import Path
 from typing import Any
 
 from .config import AUTH_URL, Config, TURNSTILE_SITEKEY_MANAGED
@@ -53,100 +57,108 @@ class AuthManager:
         self.refresh_token: str | None = cfg.refresh_token or None
         self.cf_jwt: str | None = cfg.cf_jwt or None
         self._token_exp: int | None = None
+        self._lock = threading.RLock()
 
     # ------------------------------------------------------------------
     def refresh_cf_jwt(self) -> str | None:
         """Re-read the attestation token written by the Turnstile helper."""
         from .config import state_path
 
-        try:
-            path = state_path(self.cfg.cf_jwt_file, base=self.account_dir)
-        except ValueError:
+        with self._lock:
+            try:
+                path = state_path(self.cfg.cf_jwt_file, base=self.account_dir)
+            except ValueError:
+                return self.cf_jwt
+            if path.is_file():
+                token = path.read_text(encoding="utf-8").strip()
+                if token:
+                    self.cf_jwt = token
             return self.cf_jwt
-        if path.is_file():
-            token = path.read_text(encoding="utf-8").strip()
-            if token:
-                self.cf_jwt = token
-        return self.cf_jwt
 
     def auth_headers(self) -> dict[str, str]:
-        # If we hold a token that is expired or expiring within 300s, refresh it
-        if self.id_token and self._token_exp and (self._token_exp - int(time.time()) < 300):
-            try:
-                self.ensure_token()
-            except Exception as exc:  # noqa: BLE001
-                log.warning("automatic token refresh in auth_headers failed: %s", exc)
-        headers: dict[str, str] = {}
-        if self.id_token:
-            headers["Authorization"] = f"Bearer {self.id_token}"
-        if self.cf_jwt:
-            headers["Cf-JWT"] = self.cf_jwt
-        return headers
+        with self._lock:
+            # If we hold a token that is expired or expiring within 300s, refresh it
+            if self.id_token and self._token_exp and (self._token_exp - int(time.time()) < 300):
+                try:
+                    self.ensure_token()
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("automatic token refresh in auth_headers failed: %s", exc)
+            headers: dict[str, str] = {}
+            if self.id_token:
+                headers["Authorization"] = f"Bearer {self.id_token}"
+            if self.cf_jwt:
+                headers["Cf-JWT"] = self.cf_jwt
+            return headers
 
     # ------------------------------------------------------------------
     def login(self) -> str:
         """Obtain a usable idToken. Raises on failure."""
-        if self.refresh_token:
-            try:
-                return self._create_id_token(self.refresh_token)
-            except (HttpError, CloudflareChallenge) as exc:
-                log.warning("refresh token path failed (%s); falling back to sign-in", exc)
+        with self._lock:
+            if self.refresh_token:
+                try:
+                    return self._create_id_token(self.refresh_token)
+                except (HttpError, CloudflareChallenge) as exc:
+                    log.warning("refresh token path failed (%s); falling back to sign-in", exc)
 
-        if not (self.cfg.email and self.cfg.password):
-            raise RuntimeError(
-                "no credentials: set refresh_token, or email + password"
-            )
-        return self.sign_in(self.cfg.email, self.cfg.password)
+            if not (self.cfg.email and self.cfg.password):
+                raise RuntimeError(
+                    "no credentials: set refresh_token, or email + password"
+                )
+            return self.sign_in(self.cfg.email, self.cfg.password)
 
     def sign_in(self, email: str, password: str, one_time_password: str | None = None) -> str:
         body: dict[str, Any] = {"email": email, "password": password}
         if one_time_password:
             body["oneTimePassword"] = one_time_password
 
-        headers: dict[str, str] = {}
-        if self.cf_jwt:
-            headers["Cf-JWT"] = self.cf_jwt
+        with self._lock:
+            headers: dict[str, str] = {}
+            if self.cf_jwt:
+                headers["Cf-JWT"] = self.cf_jwt
 
-        data = self.http.request(
-            "POST", f"{AUTH_URL}/players/signInWithEmailAndPassword", body, headers
-        )
-        if not isinstance(data, dict):
-            raise RuntimeError(f"unexpected sign-in response: {data!r}")
+            data = self.http.request(
+                "POST", f"{AUTH_URL}/players/signInWithEmailAndPassword", body, headers
+            )
+            if not isinstance(data, dict):
+                raise RuntimeError(f"unexpected sign-in response: {data!r}")
 
-        id_token = data.get("idToken") or data.get("firebaseIdToken")
-        refresh = data.get("refreshToken")
-        if refresh:
-            self.refresh_token = refresh
-        if not id_token:
-            raise RuntimeError(f"sign-in response had no idToken: {list(data)}")
+            id_token = data.get("idToken") or data.get("firebaseIdToken")
+            if not id_token:
+                raise RuntimeError(f"sign-in response had no idToken: {list(data)}")
 
-        self.id_token = id_token
-        self._token_exp = _jwt_exp(id_token)
-        log.info("signed in, token expires at %s", self._token_exp)
-        return id_token
+            refresh = data.get("refreshToken")
+            if refresh:
+                self.refresh_token = refresh
+                self._persist_refresh_token(refresh)
+
+            self.id_token = id_token
+            self._token_exp = _jwt_exp(id_token)
+            log.info("signed in, token expires at %s", self._token_exp)
+            return id_token
 
     def _create_id_token(self, refresh_token: str) -> str:
-        headers: dict[str, str] = {}
-        if self.cf_jwt:
-            headers["Cf-JWT"] = self.cf_jwt
+        with self._lock:
+            headers: dict[str, str] = {}
+            if self.cf_jwt:
+                headers["Cf-JWT"] = self.cf_jwt
 
-        data = self.http.request(
-            "POST", f"{AUTH_URL}/players/createIdToken", {"refreshToken": refresh_token}, headers
-        )
-        if not isinstance(data, dict):
-            raise RuntimeError(f"unexpected createIdToken response: {data!r}")
-        id_token = data.get("idToken") or data.get("firebaseIdToken")
-        if not id_token:
-            raise RuntimeError(f"createIdToken had no idToken: {list(data)}")
+            data = self.http.request(
+                "POST", f"{AUTH_URL}/players/createIdToken", {"refreshToken": refresh_token}, headers
+            )
+            if not isinstance(data, dict):
+                raise RuntimeError(f"unexpected createIdToken response: {data!r}")
+            id_token = data.get("idToken") or data.get("firebaseIdToken")
+            if not id_token:
+                raise RuntimeError(f"createIdToken had no idToken: {list(data)}")
 
-        new_refresh = data.get("refreshToken")
-        if new_refresh:
-            self.refresh_token = new_refresh
-            self._persist_refresh_token(new_refresh)
-        self.id_token = id_token
-        self._token_exp = _jwt_exp(id_token)
-        log.info("minted a new idToken (expires at %s)", self._token_exp)
-        return id_token
+            new_refresh = data.get("refreshToken")
+            if new_refresh:
+                self.refresh_token = new_refresh
+                self._persist_refresh_token(new_refresh)
+            self.id_token = id_token
+            self._token_exp = _jwt_exp(id_token)
+            log.info("minted a new idToken (expires at %s)", self._token_exp)
+            return id_token
 
     def _persist_refresh_token(self, token: str) -> None:
         """Keep the durable credential current on disk.
@@ -155,47 +167,76 @@ class AuthManager:
         then the only valid credential, so it is written back to the
         state file the moment it arrives.
         """
-        try:
-            from .config import REFRESH_TOKEN_FILE, state_path
-
-            path = state_path(REFRESH_TOKEN_FILE, base=self.account_dir)
-            path.write_text(token + "\n", encoding="utf-8")
+        tmp_path: Path | None = None
+        with self._lock:
             try:
-                import os
+                from .config import REFRESH_TOKEN_FILE, state_path
 
-                os.chmod(path, 0o600)
-            except OSError:  # noqa: F841 - advisory only (e.g. Windows)
-                pass
-        except OSError as exc:
-            log.warning("could not store the rotated refresh token: %s", exc)
+                path = state_path(REFRESH_TOKEN_FILE, base=self.account_dir)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                tmp_path = path.with_name(
+                    f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+                )
+                fd = os.open(
+                    str(tmp_path),
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                )
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(token + "\n")
+                try:
+                    os.chmod(tmp_path, 0o600)
+                except OSError:  # noqa: F841 - advisory only (e.g. Windows)
+                    pass
+                os.replace(tmp_path, path)
+                tmp_path = None
+            except OSError as exc:
+                log.warning("could not store the rotated refresh token: %s", exc)
+            finally:
+                if tmp_path is not None:
+                    try:
+                        tmp_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
 
     # ------------------------------------------------------------------
     def ensure_token(self, force: bool = False) -> str:
         """Return a valid idToken, minting a new one when it is stale."""
-        now = int(time.time())
-        if (
-            not force
-            and self.id_token
-            and self._token_exp
-            and self._token_exp - now > 300
-        ):
-            return self.id_token
-        if self.refresh_token:
-            return self._create_id_token(self.refresh_token)
-        return self.login()
+        with self._lock:
+            now = int(time.time())
+            if (
+                not force
+                and self.id_token
+                and self._token_exp
+                and self._token_exp - now > 300
+            ):
+                return self.id_token
+            if self.refresh_token:
+                try:
+                    return self._create_id_token(self.refresh_token)
+                except (HttpError, CloudflareChallenge) as exc:
+                    if self.cfg.email and self.cfg.password:
+                        log.warning(
+                            "refresh token path failed (%s); falling back to sign-in",
+                            exc,
+                        )
+                        return self.sign_in(self.cfg.email, self.cfg.password)
+                    raise
+            return self.login()
 
     def exchange_turnstile_token(self, turnstile_token: str, id_token: str | None = None) -> str:
         """Trade a solved Turnstile token for a Cf-JWT attestation token."""
-        data = self.http.request(
-            "POST",
-            f"{AUTH_URL}/cloudflareTurnstile/verify",
-            {
-                "token": turnstile_token,
-                "siteKey": TURNSTILE_SITEKEY_MANAGED,
-                "idToken": id_token or self.id_token,
-            },
-        )
-        if not isinstance(data, dict) or not data.get("jwt"):
-            raise RuntimeError(f"turnstile verify failed: {data!r}")
-        self.cf_jwt = data["jwt"]
-        return self.cf_jwt
+        with self._lock:
+            data = self.http.request(
+                "POST",
+                f"{AUTH_URL}/cloudflareTurnstile/verify",
+                {
+                    "token": turnstile_token,
+                    "siteKey": TURNSTILE_SITEKEY_MANAGED,
+                    "idToken": id_token or self.id_token,
+                },
+            )
+            if not isinstance(data, dict) or not data.get("jwt"):
+                raise RuntimeError(f"turnstile verify failed: {data!r}")
+            self.cf_jwt = data["jwt"]
+            return self.cf_jwt

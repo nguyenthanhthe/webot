@@ -15,6 +15,7 @@ class FakeSocket:
     def __init__(self, packets):
         self.packets = list(packets)
         self.sent = []
+        self.close_calls = 0
 
     def connect(self):
         pass
@@ -28,6 +29,7 @@ class FakeSocket:
         self.sent.append(raw)
 
     def close(self):
+        self.close_calls += 1
         self.packets.clear()
 
 
@@ -84,12 +86,36 @@ class HandlePacketTest(unittest.TestCase):
         self.assertEqual(fake.sent.count("3"), 30)
         self.assertTrue(any(p.startswith("40") for p in fake.sent))
 
-    def test_a_rejected_handshake_raises(self):
+    def test_a_rejected_handshake_raises_and_closes_ws(self):
         fake = FakeSocket(["0{}", "44{}"])
         client = SocketIOClient("https://game.example")
         with mock.patch.object(sio_module, "WebSocket", return_value=fake):
             with self.assertRaises(SocketIOError):
                 client.connect()
+        self.assertGreaterEqual(fake.close_calls, 1)
+        self.assertIsNone(client.ws)
+
+    def test_a_malformed_open_packet_raises_and_closes_ws(self):
+        fake = FakeSocket(["0{broken"])
+        client = SocketIOClient("https://game.example")
+        with mock.patch.object(sio_module, "WebSocket", return_value=fake):
+            with self.assertRaises(SocketIOError):
+                client.connect()
+        self.assertGreaterEqual(fake.close_calls, 1)
+        self.assertIsNone(client.ws)
+
+    def test_connect_redacts_firebase_token_in_debug_log(self):
+        fake = FakeSocket(["0{}", "40{}"])
+        client = SocketIOClient(
+            "https://game.example",
+            query={"firebaseToken": "super-secret-jwt-value"},
+        )
+        with mock.patch.object(sio_module, "WebSocket", return_value=fake):
+            with self.assertLogs("wvbot.sio", level="DEBUG") as logs:
+                client.connect()
+        joined = "\n".join(logs.output)
+        self.assertNotIn("super-secret-jwt-value", joined)
+        self.assertIn("firebaseToken=***", joined)
 
     def test_a_dead_handshake_raises(self):
         fake = FakeSocket([])
@@ -97,16 +123,41 @@ class HandlePacketTest(unittest.TestCase):
         with mock.patch.object(sio_module, "WebSocket", return_value=fake):
             with self.assertRaises(SocketIOError):
                 client.connect()
+        self.assertGreaterEqual(fake.close_calls, 1)
+        self.assertIsNone(client.ws)
 
 
 class DeathPathTest(unittest.TestCase):
     def test_a_dead_socket_dispatches_disconnect(self):
         client = client_with([])
+        fake = client.ws
         fired = []
         client.on("disconnect", lambda *a: fired.append(1))
         client._read_loop()
         self.assertEqual(fired, [1])
-        self.assertFalse(client.closed)
+        self.assertGreaterEqual(fake.close_calls, 1)
+        self.assertTrue(client.closed)
+
+    def test_a_44_connect_error_ends_the_session_and_closes(self):
+        client = client_with(['44{"message":"unauthorized"}', '42["should-not-run"]'])
+        fake = client.ws
+        events = []
+        client.on("should-not-run", lambda *a: events.append("event"))
+        client.on("disconnect", lambda *a: events.append("disconnect"))
+        client._read_loop()
+        self.assertEqual(events, ["disconnect"])
+        self.assertGreaterEqual(fake.close_calls, 1)
+
+    def test_engine_and_sio_disconnect_packets_end_read_loop_cleanly(self):
+        for pkt in ("1", "41", "41{}"):
+            client = client_with([pkt, '42["after-close"]'])
+            fake = client.ws
+            seen = []
+            client.on("after-close", lambda *a: seen.append("event"))
+            client.on("disconnect", lambda *a: seen.append("disconnect"))
+            client._read_loop()
+            self.assertEqual(seen, ["disconnect"])
+            self.assertGreaterEqual(fake.close_calls, 1)
 
     def test_a_bad_packet_ends_the_session(self):
         client = client_with(["42broken{"])

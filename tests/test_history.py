@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from wvbot.history import XpHistory, _day_key
 
@@ -83,6 +85,46 @@ class HistoryTest(unittest.TestCase):
     def test_day_key_has_the_iso_shape(self) -> None:
         self.assertRegex(_day_key(0), r"\d{4}-\d{2}-\d{2}")
         self.assertEqual(_day_key(0), "1970-01-01")
+
+    def test_get_rolls_day_over_at_utc_midnight(self) -> None:
+        with mock.patch("wvbot.history._day_key", return_value="2026-11-13"):
+            history = XpHistory(self.path)
+            history.record_game(120, games=2)
+            self.assertEqual(history.get()["today_xp"], 120)
+
+        with mock.patch("wvbot.history._day_key", return_value="2026-11-14"):
+            data = history.get()
+        self.assertEqual(data["day"], "2026-11-14")
+        self.assertEqual(data["today_xp"], 0)
+        self.assertEqual(data["today_games"], 0)
+        self.assertEqual(data["total_xp"], 120)
+        self.assertEqual(data["total_games"], 2)
+        persisted = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual(persisted["day"], "2026-11-14")
+
+    def test_concurrent_record_game_keeps_valid_json_and_exact_totals(self) -> None:
+        history = XpHistory(self.path)
+        errors: list[Exception] = []
+
+        def worker() -> None:
+            try:
+                for _ in range(10):
+                    history.record_game(5)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [])
+        data = history.get()
+        self.assertEqual(data["total_xp"], 200)
+        self.assertEqual(data["total_games"], 40)
+        persisted = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual(persisted["total_xp"], 200)
 
 
 if __name__ == "__main__":

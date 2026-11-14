@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import urllib.parse
 from typing import Any, Callable
@@ -78,40 +79,62 @@ class SocketIOClient:
     # ------------------------------------------------------------------
     def connect(self) -> None:
         url = self._ws_url()
-        log.debug("connecting to %s", url)
-        self.ws = WebSocket(url, timeout=self.timeout, extra_headers=self.headers)
-        self.ws.connect()
+        safe_url = re.sub(
+            r"((?:firebaseToken|token)=)[^&]+",
+            r"\1***",
+            url,
+            flags=re.IGNORECASE,
+        )
+        log.debug("connecting to %s", safe_url)
+        ws = WebSocket(url, timeout=self.timeout, extra_headers=self.headers)
+        with self._lock:
+            self.ws = ws
+        try:
+            ws.connect()
 
-        raw = self.ws.recv_text()
-        if raw is None or not raw.startswith("0"):
-            raise SocketIOError(f"unexpected engine.io open packet: {raw!r}")
-        payload = json.loads(raw[1:]) if len(raw) > 1 else {}
-        self.sid = payload.get("sid")
+            raw = ws.recv_text()
+            if raw is None or not raw.startswith("0"):
+                raise SocketIOError(f"unexpected engine.io open packet: {raw!r}")
+            try:
+                payload = json.loads(raw[1:]) if len(raw) > 1 else {}
+            except json.JSONDecodeError as exc:
+                raise SocketIOError(f"malformed engine.io open packet: {raw!r}") from exc
+            self.sid = payload.get("sid")
 
-        # Namespace connect; the auth object is the payload of packet 40.
-        if self.auth:
-            self.ws.send_text("40" + json.dumps(self.auth, separators=(",", ":")))
-        else:
-            self.ws.send_text("40")
+            # Namespace connect; the auth object is the payload of packet 40.
+            connect_pkt = (
+                "40" + json.dumps(self.auth, separators=(",", ":"))
+                if self.auth
+                else "40"
+            )
+            with self._lock:
+                ws.send_text(connect_pkt)
 
-        deadline_packets = 0
-        # A chatty server may interleave pings and even events before
-        # the namespace ack; the cap only guards against an endless
-        # stream, it is not a small packet count.
-        while deadline_packets < 64:
-            raw = self.ws.recv_text()
-            if raw is None:
-                raise SocketIOError("connection closed during handshake")
-            deadline_packets += 1
-            if raw.startswith("40"):
-                self.connected = True
-                log.info("socket connected (sid=%s)", self.sid)
-                return
-            if raw.startswith("44"):
-                raise SocketIOError(f"namespace connect rejected: {raw}")
-            if raw.startswith("2"):
-                self.ws.send_text("3")
-        raise SocketIOError("handshake did not complete")
+            deadline_packets = 0
+            # A chatty server may interleave pings and even events before
+            # the namespace ack; the cap only guards against an endless
+            # stream, it is not a small packet count.
+            while deadline_packets < 64:
+                raw = ws.recv_text()
+                if raw is None:
+                    raise SocketIOError("connection closed during handshake")
+                deadline_packets += 1
+                if raw.startswith("40"):
+                    self.connected = True
+                    log.info("socket connected (sid=%s)", self.sid)
+                    return
+                if raw.startswith("44"):
+                    raise SocketIOError(f"namespace connect rejected: {raw}")
+                if raw.startswith("2"):
+                    with self._lock:
+                        ws.send_text("3")
+            raise SocketIOError("handshake did not complete")
+        except Exception:
+            with self._lock:
+                if self.ws is ws:
+                    self.ws = None
+                ws.close()
+            raise
 
     # ------------------------------------------------------------------
     def _dispatch(self, event: str, args: list[Any]) -> None:
@@ -129,40 +152,57 @@ class SocketIOClient:
     def _read_loop(self) -> None:
         # close() from another thread can clear the socket between the
         # start and here; a loop without a socket simply does nothing.
-        if self.ws is None:
+        with self._lock:
+            ws = self.ws
+        if ws is None:
             return
         died = False
-        while not self._closed.is_set():
-            try:
-                raw = self.ws.recv_text()
-            except (WebSocketError, OSError) as exc:
-                if not self._closed.is_set():
-                    log.warning("socket read error: %s", exc)
-                died = True
-                break
-            if raw is None:
-                died = True
-                break
-            try:
-                self._handle_packet(raw)
-            except Exception:  # noqa: BLE001 - a bad packet must not kill the reader
-                log.exception("packet handling failed")
-                died = True
-                break
-        self.connected = False
+        try:
+            while not self._closed.is_set():
+                try:
+                    raw = ws.recv_text()
+                except (WebSocketError, OSError) as exc:
+                    if not self._closed.is_set():
+                        log.warning("socket read error: %s", exc)
+                    died = True
+                    break
+                if raw is None:
+                    died = True
+                    break
+                try:
+                    if self._handle_packet(raw) is False:
+                        died = True
+                        break
+                except Exception:  # noqa: BLE001 - a bad packet must not kill the reader
+                    log.exception("packet handling failed")
+                    died = True
+                    break
+        finally:
+            self.connected = False
+            with self._lock:
+                if self.ws is ws:
+                    self.ws = None
+                try:
+                    ws.close()
+                except Exception:  # noqa: BLE001
+                    pass
         # A socket that died on its own must not leave the session
         # hanging: the caller registered a "disconnect" handler and only
         # the dispatch below makes it fire.
         if died and not self._closed.is_set():
             self._dispatch("disconnect", [])
 
-    def _handle_packet(self, raw: str) -> None:
+    def _handle_packet(self, raw: str) -> bool:
         if not raw:
-            return
+            return True
         kind = raw[0]
         body = raw[1:]
+        if kind == "1":  # engine.io close
+            return False
         if kind == "2":  # engine.io ping
-            self.ws.send_text("3")
+            with self._lock:
+                if self.ws is not None and not self._closed.is_set():
+                    self.ws.send_text("3")
         elif kind == "3":  # engine.io pong
             pass
         elif kind == "0":  # engine.io open (reconnect greeting)
@@ -172,24 +212,29 @@ class SocketIOClient:
             data = body[1:]
             if sub == "0":  # CONNECT
                 self.connected = True
+            elif sub == "1":  # DISCONNECT
+                return False
             elif sub == "2":  # EVENT
                 try:
                     parsed = json.loads(data) if data else []
                 except json.JSONDecodeError:
-                    return
+                    return True
                 if not isinstance(parsed, list) or not parsed:
-                    return
+                    return True
                 event = parsed[0]
                 self._dispatch(event, parsed[1:])
             elif sub == "4":  # CONNECT_ERROR
                 raise SocketIOError(f"connect_error: {data}")
+        return True
 
     # ------------------------------------------------------------------
     def emit(self, event: str, *args: Any) -> None:
-        if not self.ws or self.closed:
-            raise SocketIOError("socket is not connected")
         payload = [event] + list(args)
-        self.ws.send_text("42" + json.dumps(payload, separators=(",", ":")))
+        msg = "42" + json.dumps(payload, separators=(",", ":"))
+        with self._lock:
+            if not self.ws or self._closed.is_set():
+                raise SocketIOError("socket is not connected")
+            self.ws.send_text(msg)
 
     def start(self) -> None:
         """Connect and pump messages on a background thread."""
@@ -200,9 +245,11 @@ class SocketIOClient:
     def close(self) -> None:
         self._closed.set()
         self.connected = False
-        if self.ws:
-            self.ws.close()
-        self.ws = None
+        with self._lock:
+            ws = self.ws
+            self.ws = None
+            if ws is not None:
+                ws.close()
 
     @property
     def closed(self) -> bool:

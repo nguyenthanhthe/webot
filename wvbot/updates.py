@@ -21,13 +21,13 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any
+from typing import Any, Callable
 
+from .config import CORE_URL
 from .http_client import HttpClient
 
 log = logging.getLogger("wvbot.updates")
 
-CORE_URL = "https://core.api-wolvesville.com"
 SITE_URL = "https://www.wolvesville.com"
 
 # The bundle name looks like "template/main.a3393cef.js" or
@@ -38,13 +38,29 @@ BUNDLE_RE = re.compile(r"main\.([a-z0-9]{6,12})\.js")
 class UpdateWatcher:
     """Notices when the game or the client bundle changed."""
 
-    def __init__(self, cfg: Any, http: HttpClient, auth_headers: dict[str, str] | None = None):
+    def __init__(
+        self,
+        cfg: Any,
+        http: HttpClient,
+        auth_headers: dict[str, str] | Callable[[], dict[str, str]] | None = None,
+    ):
         self.cfg = cfg
         self.http = http
-        self.auth_headers = dict(auth_headers or {})
+        self._auth_headers = auth_headers
         self.build_number: str = ""
         self.bundle_hash: str = ""
-        self.changed = False
+
+    @property
+    def auth_headers(self) -> dict[str, str]:
+        if callable(self._auth_headers):
+            return self._auth_headers()
+        return dict(self._auth_headers or {})
+
+    @auth_headers.setter
+    def auth_headers(
+        self, value: dict[str, str] | Callable[[], dict[str, str]] | None
+    ) -> None:
+        self._auth_headers = value
 
     # ------------------------------------------------------------------
     def _read_build_number(self) -> str:

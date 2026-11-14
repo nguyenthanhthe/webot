@@ -174,28 +174,37 @@ class HttpClient:
         if body is not None:
             payload = json.dumps(body).encode("utf-8")
 
+        req_headers = dict(headers) if headers else {}
         attempt = 0
         last_exc: Exception | None = None
         while attempt <= self.max_retries:
             attempt += 1
             req = urllib.request.Request(url, data=payload, method=method)
-            for key, value in self.base_headers(headers).items():
+            for key, value in self.base_headers(req_headers).items():
                 req.add_header(key, value)
             try:
                 with self._opener.open(req, timeout=self.timeout) as resp:
                     raw = resp.read().decode("utf-8", "replace")
                     return self._decode(raw)
             except urllib.error.HTTPError as exc:
-                raw = exc.read().decode("utf-8", "replace")
+                try:
+                    raw = exc.read().decode("utf-8", "replace")
+                finally:
+                    exc.close()
                 text = raw.lower()
                 if exc.code == 403 and "cloudflare jwt" in text:
-                    # The official client retries once with a fresh
-                    # attestation token.
-                    if self.token_provider is not None:
+                    # The official client retries with a fresh attestation token.
+                    last_exc = CloudflareChallenge("403 cloudflare jwt invalid")
+                    if self.token_provider is not None and attempt <= self.max_retries:
                         log.warning("403 cloudflare jwt - refreshing attestation token")
-                        self.token_provider()
-                        continue
-                    raise CloudflareChallenge("403 cloudflare jwt invalid") from exc
+                        fresh = self.token_provider()
+                        if fresh:
+                            req_headers = {
+                                k: v for k, v in req_headers.items() if k.lower() != "cf-jwt"
+                            }
+                            req_headers["Cf-JWT"] = fresh
+                            continue
+                    raise last_exc from exc
                 if exc.code == 403 and "cloudflare" in text:
                     raise CloudflareChallenge("403 blocked by Cloudflare") from exc
                 message = raw[:400]

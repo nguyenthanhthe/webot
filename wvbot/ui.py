@@ -97,14 +97,19 @@ class Ui:
                 command,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout,
                 check=False,
             )
         except FileNotFoundError as exc:
+            self._connected = False
             raise UiError(f"{self.adb} not found: {exc}") from exc
         except subprocess.TimeoutExpired as exc:
+            self._connected = False
             raise UiError(f"adb timeout: {' '.join(command)}") from exc
         if result.returncode != 0:
+            self._connected = False
             raise UiError(f"adb failed: {result.stderr.strip()[:200]}")
         return result.stdout
 

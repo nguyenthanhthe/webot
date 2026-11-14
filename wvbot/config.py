@@ -13,9 +13,11 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field, asdict
+import types
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
-from typing import Any
+from typing import Any, Union, get_args, get_origin, get_type_hints
 
 AUTH_URL = "https://auth.api-wolvesville.com"
 CORE_URL = "https://core.api-wolvesville.com"
@@ -28,16 +30,45 @@ GAME_URL_ASIA = "https://game-asia.api-wolvesville.com"
 TURNSTILE_SITEKEY_MANAGED = "0x4AAAAAAATLZS5RyqlMGxsL"
 TURNSTILE_SITEKEY_VISIBLE = "0x4AAAAAAATLZulAZ6iRPZsU"
 
-STATE_DIR = Path.home() / ".wv-bot"
-
-# On Android the home directory is fixed: `Path.home()` can point somewhere
-# else when the process is started through `run-as`.
 ANDROID_HOME = Path("/data/data/com.termux/files/home")
-if ANDROID_HOME.is_dir():
-    STATE_DIR = ANDROID_HOME / ".wv-bot"
+
+
+def _env_state_dir() -> Path | None:
+    for env_key in ("WV_BOT_STATE_DIR", "STATE_DIR"):
+        raw = os.environ.get(env_key, "").strip()
+        if raw:
+            return Path(raw)
+    return None
+
+
+def _platform_state_dir() -> Path:
+    # On Android the home directory is fixed: `Path.home()` can point somewhere
+    # else when the process is started through `run-as`.
+    if ANDROID_HOME.is_dir():
+        return ANDROID_HOME / ".wv-bot"
+    return Path.home() / ".wv-bot"
+
+
+_DEFAULT_STATE_DIR = _env_state_dir() or _platform_state_dir()
+STATE_DIR = _DEFAULT_STATE_DIR
 
 # The durable credential, stored on its own (mode 600).
 REFRESH_TOKEN_FILE = "refresh_token.txt"
+
+
+def get_state_dir() -> Path:
+    """Return the active state directory.
+
+    Priority: explicitly overridden ``STATE_DIR`` (preserving test
+    monkeypatching), then ``WV_BOT_STATE_DIR`` / ``STATE_DIR`` env vars,
+    then the platform default.
+    """
+    if STATE_DIR != _DEFAULT_STATE_DIR:
+        return STATE_DIR
+    env_dir = _env_state_dir()
+    if env_dir is not None:
+        return env_dir
+    return _platform_state_dir()
 
 
 def state_path(name: str, base: Path | None = None) -> Path:
@@ -55,7 +86,7 @@ def state_path(name: str, base: Path | None = None) -> Path:
         or Path(name).name != name
     ):
         raise ValueError(f"not a valid file name: {name!r}")
-    root = base if base is not None else STATE_DIR
+    root = base if base is not None else get_state_dir()
     return root / name
 
 
@@ -166,8 +197,9 @@ class Config:
     wheel_max_roses: int = 100
 
     # --- dashboard -----------------------------------------------------
-    dashboard_host: str = "0.0.0.0"
+    dashboard_host: str = "127.0.0.1"
     dashboard_port: int = 8787
+    dashboard_token: str = ""
 
     # --- runtime -------------------------------------------------------
     log_level: str = "INFO"
@@ -180,27 +212,64 @@ class Config:
 
     def to_dict(self) -> dict:
         data = asdict(self)
-        for key in ("password", "refresh_token", "cf_jwt"):
+        for key in ("password", "refresh_token", "cf_jwt", "dashboard_token"):
             if data.get(key):
                 data[key] = "***"
         return data
 
 
-def _coerce(current: Any, raw: str) -> Any:
-    if isinstance(current, bool):
+CONFIG_FIELDS: frozenset[str] = frozenset(f.name for f in fields(Config))
+_CONFIG_FIELD_TYPES: dict[str, Any] = get_type_hints(Config)
+
+
+def apply_overrides(cfg: Config, mapping: Mapping[str, Any]) -> Config:
+    """Apply ``mapping`` values restricted to declared ``Config`` fields."""
+    for key, value in mapping.items():
+        if key in CONFIG_FIELDS:
+            setattr(cfg, key, value)
+    return cfg
+
+
+def _unwrap_type(field_type: Any) -> tuple[Any, bool]:
+    """Return ``(base_type, allows_none)`` for a dataclass field annotation."""
+    origin = get_origin(field_type)
+    if origin in (Union, types.UnionType):
+        args = get_args(field_type)
+        allows_none = type(None) in args
+        non_none = [arg for arg in args if arg is not type(None)]
+        inner = non_none[0] if len(non_none) == 1 else field_type
+        return (get_origin(inner) or inner), allows_none
+    return (origin or field_type), False
+
+
+def _coerce(current: Any, raw: str, field_type: Any = None) -> Any:
+    target_type: Any = None
+    allows_none = False
+    if field_type is not None:
+        target_type, allows_none = _unwrap_type(field_type)
+        if allows_none and raw.strip().lower() in ("", "none", "null"):
+            return None
+    if target_type is None and current is not None:
+        target_type = type(current)
+
+    if target_type is bool:
         return raw.strip().lower() in ("1", "true", "yes", "on")
-    if isinstance(current, int) and not isinstance(current, bool):
+    if target_type is int:
+        if not raw.strip():
+            return None if allows_none else current
         return int(float(raw))
-    if isinstance(current, float):
+    if target_type is float:
+        if not raw.strip():
+            return None if allows_none else current
         return float(raw)
-    if isinstance(current, list):
+    if target_type is list:
         return [p.strip() for p in raw.split(",") if p.strip()]
     return raw
 
 
 def load_config(config_file: str | None = None, base: Path | None = None) -> Config:
     cfg = Config()
-    root = base if base is not None else STATE_DIR
+    root = base if base is not None else get_state_dir()
     root.mkdir(parents=True, exist_ok=True)
 
     name = config_file or os.environ.get("WV_BOT_CONFIG", "config.json")
@@ -208,14 +277,20 @@ def load_config(config_file: str | None = None, base: Path | None = None) -> Con
     if cfg_path.is_file():
         with open(cfg_path, "r", encoding="utf-8") as fh:
             data = json.load(fh)
-        for key, value in data.items():
-            if hasattr(cfg, key):
-                setattr(cfg, key, value)
+        if isinstance(data, Mapping):
+            apply_overrides(cfg, data)
 
-    for key in list(asdict(cfg).keys()):
+    if "WV_DASHBOARD_TOKEN" in os.environ:
+        cfg.dashboard_token = os.environ["WV_DASHBOARD_TOKEN"]
+
+    for key in CONFIG_FIELDS:
         env_key = "WV_BOT_" + key.upper()
         if env_key in os.environ:
-            setattr(cfg, key, _coerce(getattr(cfg, key), os.environ[env_key]))
+            setattr(
+                cfg,
+                key,
+                _coerce(getattr(cfg, key), os.environ[env_key], _CONFIG_FIELD_TYPES.get(key)),
+            )
 
     # A cf_jwt file wins over the inline value when it exists: the external
     # Turnstile helper refreshes it in place.
