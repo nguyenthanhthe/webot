@@ -215,21 +215,7 @@ class WebBotTest(unittest.TestCase):
         p = wb._payload_path()
         self.assertEqual(p.name, webbot.PAYLOAD_FILE)
         self.assertTrue(p.exists())
-
-    def test_solve_turnstile_always_returns_to_parent_frame(self):
-        wb = webbot.WebBot(Config())
-        driver = MagicMock()
-        driver.send.side_effect = [
-            {webbot.ELEMENT_KEY: "el-1"},     # FindElement (iframe)
-            None,                             # SwitchToFrame
-            {webbot.ELEMENT_KEY: "cb-1"},     # FindElement (checkbox)
-            RuntimeError("click error"),      # ElementClick inside iframe
-            None,                             # SwitchToParentFrame in finally
-        ]
-        self.assertFalse(wb._solve_turnstile(driver))
-        commands = [c.args[0] for c in driver.send.call_args_list]
-        self.assertIn("WebDriver:SwitchToParentFrame", commands)
-        self.assertEqual(commands[-1], "WebDriver:SwitchToParentFrame")
+        self.assertFalse(hasattr(webbot.WebBot, "_solve_turnstile"))
 
 
 if __name__ == "__main__":

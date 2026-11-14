@@ -1083,6 +1083,7 @@ class _Handler(BaseHTTPRequestHandler):
 
         ctype = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
         if ctype != "application/json":
+            self.close_connection = True
             self._send(
                 415,
                 b'{"error":"Content-Type must be application/json"}',
@@ -1095,12 +1096,15 @@ class _Handler(BaseHTTPRequestHandler):
             try:
                 length = int(raw_len)
             except ValueError:
+                self.close_connection = True
                 self._send(400, b'{"error":"invalid Content-Length"}', "application/json")
                 return
             if length < 0:
+                self.close_connection = True
                 self._send(400, b'{"error":"negative Content-Length"}', "application/json")
                 return
             if length > MAX_POST_BYTES:
+                self.close_connection = True
                 self._send(413, b'{"error":"payload too large"}', "application/json")
                 return
         else:
@@ -1172,7 +1176,13 @@ class _Handler(BaseHTTPRequestHandler):
 
         if path == "/api/accounts" or path.startswith("/api/accounts/"):
             action = str(payload.get("action") or "").lower()
-            from .farm import RosterError, load_roster, remove_account_from_roster, save_account_to_roster
+            from .farm import (
+                RosterError,
+                _validate_account_name,
+                load_roster,
+                remove_account_from_roster,
+                save_account_to_roster,
+            )
 
             root = self._farm_root()
             name = str(payload.get("name") or "").strip()
@@ -1201,14 +1211,54 @@ class _Handler(BaseHTTPRequestHandler):
             if not name:
                 self._send(400, b'{"error":"missing account name"}', "application/json")
                 return
+            try:
+                safe_name = _validate_account_name(name)
+            except RosterError as exc:
+                self._send(400, json.dumps({"error": str(exc)}).encode(), "application/json")
+                return
+
+            if self.farm is not None:
+                farm_lock = getattr(self.farm, "_lock", None)
+                farm_slots = getattr(self.farm, "_slots", None)
+                max_bots = getattr(self.farm, "max_bots", None)
+                conflict = False
+                if farm_slots is not None:
+                    if farm_lock is not None:
+                        with farm_lock:
+                            conflict = any(s.name == safe_name for s in farm_slots) or (
+                                max_bots is not None and len(farm_slots) >= max_bots
+                            )
+                    else:
+                        conflict = any(s.name == safe_name for s in farm_slots) or (
+                            max_bots is not None and len(farm_slots) >= max_bots
+                        )
+                elif hasattr(self.farm, "snapshot"):
+                    snap = self.farm.snapshot()
+                    bots = snap.get("bots") or []
+                    conflict = any(str(b.get("name") or "") == safe_name for b in bots) or (
+                        max_bots is not None and len(bots) >= max_bots
+                    )
+                if conflict:
+                    self._send(
+                        409,
+                        json.dumps(
+                            {
+                                "ok": False,
+                                "error": "account already exists in farm or max_bots reached",
+                            }
+                        ).encode(),
+                        "application/json",
+                    )
+                    return
+
             existed_before = False
             try:
                 if (root / "accounts.json").is_file():
-                    existed_before = any(a.get("name") == name for a in load_roster(root))
+                    existed_before = any(a.get("name") == safe_name for a in load_roster(root))
             except RosterError:
                 pass
             try:
-                entry = save_account_to_roster(root, name, token)
+                entry = save_account_to_roster(root, safe_name, token)
             except Exception as exc:  # noqa: BLE001
                 self._send(400, json.dumps({"error": str(exc)}).encode(), "application/json")
                 return
@@ -1218,7 +1268,7 @@ class _Handler(BaseHTTPRequestHandler):
                 if not added:
                     if not existed_before:
                         try:
-                            remove_account_from_roster(root, str(entry.get("name") or name))
+                            remove_account_from_roster(root, str(entry.get("name") or safe_name))
                         except Exception:
                             pass
                     self._send(

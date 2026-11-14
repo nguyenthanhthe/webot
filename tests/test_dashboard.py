@@ -161,7 +161,7 @@ class DashboardSecurityAndApiTest(unittest.TestCase):
                 def run(self):
                     self.stop_event.wait(2.0)
 
-            farm = Farm([{"name": "botone"}], bot_factory=lambda a: _FakeBot(a), farm_root=root)
+            farm = Farm([{"name": "botone"}], bot_factory=lambda a: _FakeBot(a), max_bots=1, farm_root=root)
             srv = farm.start_dashboard(host="127.0.0.1", port=0)
             port = srv.server_address[1]
             base = f"http://127.0.0.1:{port}"
@@ -170,10 +170,19 @@ class DashboardSecurityAndApiTest(unittest.TestCase):
                 code, _, _ = _req(f"{base}/api/control", method="POST", body=b'{"action":"pause"}', headers={"Content-Type": "text/plain"})
                 self.assertEqual(code, 415)
 
-                # 413 when body exceeds MAX_POST_BYTES
-                huge = json.dumps({"action": "pause", "pad": "x" * 70000})
-                code, _, _ = _req(f"{base}/api/control", method="POST", body=huge, headers={"Content-Type": "application/json"})
-                self.assertEqual(code, 413)
+                # 413 when Content-Length exceeds MAX_POST_BYTES (exact boundary, no unread body RST race)
+                import http.client
+                conn = http.client.HTTPConnection("127.0.0.1", port, timeout=3.0)
+                try:
+                    conn.putrequest("POST", "/api/control")
+                    conn.putheader("Content-Type", "application/json")
+                    conn.putheader("Content-Length", "65537")
+                    conn.endheaders()
+                    resp = conn.getresponse()
+                    resp.read()
+                    self.assertEqual(resp.status, 413)
+                finally:
+                    conn.close()
 
                 # 404 on unknown POST path
                 code, _, _ = _req(f"{base}/api/nonexistent", method="POST", body="{}", headers={"Content-Type": "application/json"})
@@ -189,7 +198,7 @@ class DashboardSecurityAndApiTest(unittest.TestCase):
                     )
                     self.assertEqual(code, 400)
 
-                # 409 when adding duplicate account (farm.add_account returns False)
+                # 409 when adding duplicate account by raw OR unnormalized alias does not erase/overwrite roster
                 code, _, _ = _req(
                     f"{base}/api/accounts",
                     method="POST",
@@ -197,6 +206,28 @@ class DashboardSecurityAndApiTest(unittest.TestCase):
                     headers={"Content-Type": "application/json"},
                 )
                 self.assertEqual(code, 409)
+
+                code, _, _ = _req(
+                    f"{base}/api/accounts",
+                    method="POST",
+                    body=json.dumps({"name": "bot one", "refresh_token": "rt-overwrite"}),
+                    headers={"Content-Type": "application/json"},
+                )
+                self.assertEqual(code, 409)
+                roster_data = json.loads((root / "accounts.json").read_text(encoding="utf-8"))
+                self.assertEqual(roster_data["accounts"], [{"name": "botone"}])
+                self.assertEqual((root / "accounts" / "botone" / "refresh_token.txt").read_text(encoding="utf-8").strip(), "tok")
+
+                # 409 when farm max_bots capacity is full does not write new account into accounts.json
+                code, _, _ = _req(
+                    f"{base}/api/accounts",
+                    method="POST",
+                    body=json.dumps({"name": "gamma", "refresh_token": "rt-gamma"}),
+                    headers={"Content-Type": "application/json"},
+                )
+                self.assertEqual(code, 409)
+                roster_data = json.loads((root / "accounts.json").read_text(encoding="utf-8"))
+                self.assertEqual(roster_data["accounts"], [{"name": "botone"}])
 
                 # /api/rooms with farm._room_probe when no active bot returns 502
                 code, _, _ = _req(f"{base}/api/rooms")
