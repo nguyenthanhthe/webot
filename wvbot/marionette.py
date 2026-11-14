@@ -4,10 +4,6 @@ Marionette speaks a simple framing: ``<length>:<json>``.  We only need a
 handful of commands to drive a headless Firefox: open a page, run JavaScript,
 read the storage.  No third-party dependency, so it installs on Termux
 without a compiler.
-
-The point of using a real browser is that Cloudflare's Turnstile widget and
-the TLS fingerprint both behave like they do for a human - the bot itself
-never needs them again once it holds a refresh token.
 """
 
 from __future__ import annotations
@@ -21,6 +17,8 @@ from typing import Any
 log = logging.getLogger("wvbot.marionette")
 
 DEFAULT_PORT = 2828
+MAX_PACKET_BYTES = 16 * 1024 * 1024
+MAX_PREFIX_DIGITS = 10
 
 
 class MarionetteError(RuntimeError):
@@ -39,15 +37,19 @@ class Marionette:
     # ------------------------------------------------------------------
     def connect(self, retries: int = 30, delay: float = 1.0) -> None:
         last: Exception | None = None
-        for _ in range(retries):
+        attempts = max(1, int(retries))
+        for attempt in range(attempts):
+            self._buffer = b""
             try:
                 self._sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
                 self._sock.settimeout(self.timeout)
                 self._read_packet()  # server handshake
                 return
-            except OSError as exc:
+            except (OSError, MarionetteError, ValueError) as exc:
                 last = exc
-                time.sleep(delay)
+                self.close()
+                if attempt + 1 < attempts:
+                    time.sleep(delay)
         raise MarionetteError(f"cannot reach marionette: {last}")
 
     # ------------------------------------------------------------------
@@ -70,9 +72,18 @@ class Marionette:
             if not char.isdigit():
                 raise MarionetteError(f"bad packet length prefix: {digits!r}")
             digits += char
+            if len(digits) > MAX_PREFIX_DIGITS:
+                raise MarionetteError("packet length prefix too long")
+        if not digits:
+            raise MarionetteError("empty packet length prefix")
         length = int(digits)
+        if length <= 0 or length > MAX_PACKET_BYTES:
+            raise MarionetteError(f"packet length {length} out of bounds")
         payload = self._read_exact(length)
-        return json.loads(payload.decode("utf-8"))
+        try:
+            return json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise MarionetteError(f"malformed marionette JSON packet: {exc}") from exc
 
     def send(self, command: str, params: dict[str, Any] | None = None) -> Any:
         if self._sock is None:
@@ -126,6 +137,7 @@ class Marionette:
             return None
 
     def close(self) -> None:
+        self._buffer = b""
         if self._sock is not None:
             try:
                 self._sock.close()

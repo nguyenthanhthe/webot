@@ -1,10 +1,9 @@
 """Keep DNS working inside Termux.
 
-On this device Android hands Termux a nameserver that stops answering as
-soon as Tailscale is up, which breaks every API call.  This module probes a
-short list of resolvers and writes the first working one into the Termux
-``resolv.conf`` - the local router first, because it is the most stable
-option, public resolvers only as a fallback.
+On Termux Android can hand out a nameserver that stops answering when
+Tailscale is up, which breaks API calls. This module probes resolvers
+and writes the first working one into Termux's ``resolv.conf`` while
+avoiding touching non-Termux hosts or mutating global socket timeouts.
 """
 
 from __future__ import annotations
@@ -23,7 +22,6 @@ PUBLIC_FALLBACKS = ("8.8.8.8", "1.1.1.1", "9.9.9.9")
 
 def _resolve_works(host: str = PROBE_HOST) -> bool:
     try:
-        socket.setdefaulttimeout(5)
         socket.gethostbyname(host)
         return True
     except OSError:
@@ -66,25 +64,32 @@ def candidate_nameservers() -> list[str]:
 
 
 def _write_resolv(nameserver: str) -> None:
-    RESOLV.parent.mkdir(parents=True, exist_ok=True)
+    if not RESOLV.parent.is_dir():
+        return
     RESOLV.write_text(
         f"nameserver {nameserver}\noptions timeout:2 attempts:1\n",
         encoding="utf-8",
     )
 
 
+def _current_nameserver() -> str:
+    try:
+        for line in RESOLV.read_text(encoding="utf-8").splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[0] == "nameserver":
+                return parts[1]
+    except OSError:
+        pass
+    return ""
+
+
 def ensure_dns(force: bool = False) -> str:
     """Make sure name resolution works. Returns the nameserver in use."""
     if not force and _resolve_works():
-        current = ""
-        try:
-            for line in RESOLV.read_text(encoding="utf-8").splitlines():
-                if line.startswith("nameserver"):
-                    current = line.split()[1]
-                    break
-        except OSError:
-            current = ""
-        return current or "system"
+        return _current_nameserver() or "system"
+
+    if not RESOLV.parent.is_dir():
+        return "system" if _resolve_works() else "failed"
 
     original = None
     try:

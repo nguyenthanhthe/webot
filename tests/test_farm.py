@@ -328,6 +328,324 @@ class FarmTest(unittest.TestCase):
                 server.server_close()
 
 
+class FarmSecurityAndResilienceTest(unittest.TestCase):
+    def test_account_name_traversal_rejected_while_clean_name_compatible(self):
+        from wvbot.farm import (
+            Farm,
+            RosterError,
+            clean_name,
+            default_bot_factory,
+            load_roster,
+            remove_account_from_roster,
+            save_account_to_roster,
+        )
+
+        self.assertEqual(clean_name("../../etc"), "etc")
+
+        bad_names = ["../evil", "..", ".", "a/b", "a\\b", "bad\x00name", ""]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for bad in bad_names:
+                with self.subTest(bad=bad):
+                    with self.assertRaises((RosterError, ValueError)):
+                        save_account_to_roster(root, bad, refresh_token="tok")
+                    with self.assertRaises((RosterError, ValueError)):
+                        default_bot_factory({"name": bad}, farm_root=root)
+
+            farm = Farm([], bot_factory=lambda acc: None, farm_root=root)
+            for bad in bad_names:
+                self.assertFalse(farm.add_account({"name": bad}))
+                self.assertFalse(farm.remove_account(bad))
+                self.assertFalse(remove_account_from_roster(root, bad))
+
+            (root / "accounts.json").write_text(
+                json.dumps({"accounts": [{"name": "../escape"}]}),
+                encoding="utf-8",
+            )
+            with self.assertRaises((RosterError, ValueError)):
+                load_roster(root)
+
+    def test_corrupt_or_non_list_roster_not_wiped_by_save(self):
+        from wvbot.farm import RosterError, save_account_to_roster
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            roster_path = root / "accounts.json"
+
+            corrupt_text = "{not valid json"
+            roster_path.write_text(corrupt_text, encoding="utf-8")
+            with self.assertRaises(RosterError):
+                save_account_to_roster(root, "alice", refresh_token="tok")
+            self.assertEqual(roster_path.read_text(encoding="utf-8"), corrupt_text)
+
+            non_list_text = json.dumps({"accounts": {"alice": {}}})
+            roster_path.write_text(non_list_text, encoding="utf-8")
+            with self.assertRaises(RosterError):
+                save_account_to_roster(root, "alice", refresh_token="tok")
+            self.assertEqual(roster_path.read_text(encoding="utf-8"), non_list_text)
+
+    def test_default_bot_factory_preserves_rotated_token_inherits_safe_defaults_and_blocks_method_override(self):
+        from wvbot.farm import default_bot_factory
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # Root config has both safe shared defaults and sensitive fields
+            (root / "config.json").write_text(
+                json.dumps({
+                    "use_asia_host": True,
+                    "daily_restart_hour": 5,
+                    "game_mode": "quick",
+                    "refresh_token": "root-secret-token",
+                    "email": "root@example.com",
+                    "password": "root-secret-password",
+                }),
+                encoding="utf-8",
+            )
+
+            acc_dir = root / "accounts" / "alice"
+            acc_dir.mkdir(parents=True)
+            (acc_dir / "refresh_token.txt").write_text("rotated-on-disk-token\n", encoding="utf-8")
+
+            bot = default_bot_factory(
+                {
+                    "name": "alice",
+                    "refresh_token": "stale-roster-token",
+                    "game_base_url": "https://evil.example",
+                    "to_dict": "not-a-method",
+                    "__class__": "hijack",
+                    "daily_restart_hour": 2,
+                },
+                farm_root=root,
+            )
+
+            # Rotated disk token wins over stale inline token
+            self.assertEqual((acc_dir / "refresh_token.txt").read_text(encoding="utf-8").strip(), "rotated-on-disk-token")
+            self.assertEqual(bot.cfg.refresh_token, "rotated-on-disk-token")
+            # Inherits non-secret root defaults unless overridden by account
+            self.assertTrue(bot.cfg.use_asia_host)
+            self.assertEqual(bot.cfg.game_mode, "quick")
+            self.assertEqual(bot.cfg.daily_restart_hour, 2)
+            # Root secrets are never inherited by per-account bot
+            self.assertEqual(bot.cfg.email, "")
+            self.assertEqual(bot.cfg.password, "")
+            # Config methods and @property were NOT overwritten via setattr
+            self.assertTrue(callable(bot.cfg.to_dict))
+            self.assertNotEqual(bot.cfg.game_base_url, "https://evil.example")
+
+    def test_default_bot_factory_seeds_missing_or_empty_token_file(self):
+        from wvbot.farm import default_bot_factory
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            acc_dir = root / "accounts" / "bob"
+            acc_dir.mkdir(parents=True)
+            (acc_dir / "refresh_token.txt").write_text("   \n", encoding="utf-8")
+
+            bot = default_bot_factory(
+                {"name": "bob", "refresh_token": "fresh-roster-token"},
+                farm_root=root,
+            )
+            self.assertEqual((acc_dir / "refresh_token.txt").read_text(encoding="utf-8"), "fresh-roster-token")
+            self.assertEqual(bot.cfg.refresh_token, "fresh-roster-token")
+
+    def test_unexpected_clean_exit_counts_as_crash_backoff_and_healthy_reset(self):
+        from wvbot.farm import Farm
+
+        class CleanExitBot:
+            def __init__(self, account):
+                self.stop_event = threading.Event()
+                self.pause_event = threading.Event()
+                self.hub = None
+                self.store = type("S", (), {"get": lambda _s: {"status": "playing"}})()
+                self.runs = 0
+
+            def run(self):
+                self.runs += 1
+                # Exits unexpectedly without raising
+
+        created: list[CleanExitBot] = []
+
+        def strict_one_arg_factory(account):
+            bot = CleanExitBot(account)
+            created.append(bot)
+            return bot
+
+        farm = Farm(
+            [{"name": "cleanexit"}],
+            bot_factory=strict_one_arg_factory,
+            farm_root=Path(tempfile.gettempdir()),
+        )
+        farm.crash_backoff_base = 0.02
+        farm.crash_backoff_max = 0.05
+        farm.start()
+        try:
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                snap = farm.snapshot()["bots"][0]
+                if snap["status"] == "failed":
+                    break
+                time.sleep(0.02)
+            snap = farm.snapshot()["bots"][0]
+            self.assertEqual(snap["status"], "failed")
+            self.assertEqual(snap["crashes"], 3)
+            self.assertEqual(len(created), 3)
+            self.assertEqual(sum(b.runs for b in created), 3)
+            # Hub attached without changing 1-arg bot_factory contract
+            self.assertIs(created[0].hub, farm.hub)
+        finally:
+            farm.stop()
+
+        # Sustained healthy uptime resets crash counter
+        class HealthyThenExitBot:
+            def __init__(self, account):
+                self.stop_event = threading.Event()
+                self.pause_event = threading.Event()
+                self.runs = 0
+
+            def run(self):
+                self.runs += 1
+                if self.runs == 1:
+                    raise RuntimeError("transient boot hiccup")
+                if self.runs == 2:
+                    time.sleep(0.08)
+                    raise RuntimeError("later hiccup after healthy uptime")
+                self.stop_event.wait(2.0)
+
+        healthy_bot = HealthyThenExitBot({"name": "heal"})
+        farm2 = Farm([{"name": "heal"}], bot_factory=lambda acc: healthy_bot, farm_root=Path(tempfile.gettempdir()))
+        farm2.crash_backoff_base = 0.01
+        farm2.crash_backoff_max = 0.02
+        farm2.healthy_uptime_reset_sec = 0.04
+        farm2.start()
+        try:
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                if healthy_bot.runs >= 3:
+                    break
+                time.sleep(0.02)
+            self.assertEqual(healthy_bot.runs, 3)
+            snap = farm2.snapshot()["bots"][0]
+            self.assertNotEqual(snap["status"], "failed")
+            # First crash reset during healthy run 2, so after run 2's crash count was 1 (not 2)
+            self.assertLessEqual(snap["crashes"], 1)
+        finally:
+            farm2.stop()
+
+    def test_slot_status_updates_reward_snapshot_resilience_and_stop_closes_dashboard(self):
+        from wvbot.farm import Farm
+
+        class RichFakeBot:
+            def __init__(self, account):
+                self.stop_event = threading.Event()
+                self.pause_event = threading.Event()
+                self.started = threading.Event()
+                self.exited = threading.Event()
+                self.rewards: list[str] = []
+                self.fail_store = False
+                self.store = self
+
+            def get(self):
+                if self.fail_store:
+                    raise RuntimeError("store read error")
+                return {"status": "in_game", "level": 42}
+
+            def _reward(self, kind):
+                self.rewards.append(kind)
+                return True
+
+            def run(self):
+                self.started.set()
+                self.stop_event.wait(5.0)
+                self.exited.set()
+
+        bot_instance = RichFakeBot({"name": "alpha"})
+        with tempfile.TemporaryDirectory() as tmp:
+            farm = Farm(
+                [{"name": "alpha"}],
+                bot_factory=lambda acc: bot_instance,
+                farm_root=Path(tmp),
+            )
+            srv = farm.start_dashboard(host="127.0.0.1", port=0)
+            port = srv.server_address[1]
+            farm.start()
+            try:
+                self.assertTrue(bot_instance.started.wait(2.0))
+                deadline = time.monotonic() + 2.0
+                while time.monotonic() < deadline:
+                    with farm._lock:
+                        slot_status = farm._slots[0].status
+                    if slot_status == "in_game":
+                        break
+                    time.sleep(0.02)
+                self.assertEqual(farm.snapshot()["bots"][0]["status"], "in_game")
+
+                self.assertTrue(farm.reward("lootbox", bot_name="alpha"))
+                self.assertTrue(farm.reward("wheel"))
+                self.assertEqual(bot_instance.rewards, ["lootbox", "wheel"])
+
+                bot_instance.fail_store = True
+                snap = farm.snapshot()["bots"][0]
+                self.assertEqual(snap["name"], "alpha")
+                self.assertIn(snap["status"], ("running", "in_game"))
+            finally:
+                farm.stop()
+
+            self.assertTrue(bot_instance.exited.wait(2.0))
+            import urllib.error
+            import urllib.request
+            with self.assertRaises((urllib.error.URLError, OSError)):
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1.0):
+                    pass
+
+    def test_concurrent_add_remove_and_removed_slot_not_restarted(self):
+        from wvbot.farm import Farm
+
+        spawned: dict[str, int] = {}
+
+        class ShortLivedBot:
+            def __init__(self, account):
+                self.name = account["name"]
+                self.stop_event = threading.Event()
+                self.pause_event = threading.Event()
+                spawned[self.name] = spawned.get(self.name, 0) + 1
+
+            def run(self):
+                self.stop_event.wait(0.2)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            farm = Farm(
+                [{"name": "stay"}],
+                bot_factory=lambda acc: ShortLivedBot(acc),
+                max_bots=10,
+                farm_root=Path(tmp),
+            )
+            farm.start()
+            try:
+                errors: list[Exception] = []
+
+                def worker(idx: int):
+                    try:
+                        name = f"bot{idx}"
+                        farm.add_account({"name": name})
+                        time.sleep(0.02)
+                        farm.snapshot()
+                        farm.remove_account(name)
+                    except Exception as exc:
+                        errors.append(exc)
+
+                threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join(timeout=3.0)
+                self.assertEqual(errors, [])
+
+                names = [s["name"] for s in farm.snapshot()["bots"]]
+                self.assertEqual(names, ["stay"])
+            finally:
+                farm.stop()
+
 
 if __name__ == "__main__":
     unittest.main()
+

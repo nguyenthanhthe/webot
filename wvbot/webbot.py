@@ -5,7 +5,7 @@ through Marionette, so both hosts behave identically:
 
 * the browser handles Cloudflare and the login
 * the injected script plays the game over socket.io
-* the script reports to the local dashboard with a small HTTP POST
+* the script reports to the local dashboard
 
 The supervisor keeps the browser alive: if Firefox dies, the page crashes or
 the injected script stops answering, everything is restarted.
@@ -15,16 +15,18 @@ from __future__ import annotations
 
 import json
 import logging
+import signal
 import threading
 import time
 from pathlib import Path
 from typing import Any
 
-from .config import Config, load_config, state_path
+from .config import AUTH_URL, Config, load_config, state_path
 from .dashboard import StatusStore, start_dashboard
 from .firefox import launch_headless, stop, wait_for_marionette
 from .http_client import HttpClient
 from .marionette import Marionette
+from .stream import StreamHub
 
 log = logging.getLogger("wvbot.webbot")
 
@@ -32,11 +34,6 @@ GAME_URL = "https://www.wolvesville.com/"
 PAYLOAD_FILE = "payload.js"
 ELEMENT_KEY = "element-6066-11e4-a52e-4f735466cecf"
 
-# Marionette/WebDriver execute a *function body*: the arguments arrive as
-# arguments[0], arguments[1], ... and the result has to be returned.
-
-# Fill one of the login inputs the way a human would (React needs the
-# native setter plus input/change events).
 FILL_JS = """
 var kind = arguments[0];
 var value = arguments[1];
@@ -64,7 +61,6 @@ el.dispatchEvent(new Event('change', {bubbles: true}));
 return true;
 """
 
-# Click the innermost element whose text matches one of the patterns.
 CLICK_TEXT_JS = """
 var patterns = arguments[0];
 var re = new RegExp(patterns.join('|'), 'i');
@@ -84,7 +80,6 @@ deepest[0].click();
 return true;
 """
 
-# A snapshot of the page, used to report why a login step did not work.
 PAGE_STATE_JS = """
 return {
   url: location.href,
@@ -109,9 +104,6 @@ for (var i = 0; i < Object.keys(window.localStorage).length; i++) {
 return false;
 """
 
-# Plant the session into the page so the official client believes it is
-# logged in.  The client then refreshes the token and the Cloudflare
-# attestation on its own, and the injected payload picks both up.
 SEED_SESSION_JS = """
 var tokens = arguments[0];
 if (!tokens || !tokens.idToken) return false;
@@ -136,9 +128,10 @@ return {state: window.__wvbotBot.state, events: window.__wvbotBot.drainEvents()}
 class WebBot:
     """Headless Firefox + injected payload, supervised."""
 
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, hub: StreamHub | None = None):
         self.cfg = cfg
         self.store = StatusStore()
+        self.hub = hub if hub is not None else StreamHub()
         self.client: Marionette | None = None
         self.process = None
         self.stop_event = threading.Event()
@@ -146,20 +139,17 @@ class WebBot:
 
     # ------------------------------------------------------------------
     def _payload_path(self) -> Path:
-        """The payload sits next to the package (copied in by the installer)."""
+        """Locate ``payload.js`` next to the package, under ``web/``, or in state_dir."""
         here = Path(__file__).resolve().parent.parent
-        candidate = here / PAYLOAD_FILE
-        if candidate.is_file():
-            return candidate
-        fallback = state_path(PAYLOAD_FILE)
-        if fallback.is_file():
-            return fallback
+        for candidate in (here / PAYLOAD_FILE, here / "web" / PAYLOAD_FILE, state_path(PAYLOAD_FILE)):
+            if candidate.is_file():
+                return candidate
         raise FileNotFoundError(f"{PAYLOAD_FILE} is missing next to the package")
 
     def _config_js(self) -> str:
         settings = {
-            "gameHost": "https://game.api-wolvesville.com",
-            "authHost": "https://auth.api-wolvesville.com",
+            "gameHost": self.cfg.game_base_url,
+            "authHost": AUTH_URL,
             "refreshToken": self.cfg.refresh_token or None,
             "roomNames": self.cfg.room_names,
             "language": self.cfg.language,
@@ -170,17 +160,13 @@ class WebBot:
 
     # ------------------------------------------------------------------
     def _mint_id_token(self) -> str:
-        """Mint an idToken from the refreshToken.
-
-        The refresh path needs no Cloudflare attestation, so it works
-        without a browser.  The idToken is good for an hour.
-        """
+        """Mint an idToken from the refreshToken."""
         if not self.cfg.refresh_token:
             raise RuntimeError("no refresh token configured")
         client = HttpClient()
         data = client.request(
             "POST",
-            "https://auth.api-wolesville.com/players/createIdToken",
+            f"{AUTH_URL}/players/createIdToken",
             body={"refreshToken": self.cfg.refresh_token},
         )
         token = (data or {}).get("idToken")
@@ -191,7 +177,12 @@ class WebBot:
     def _seed_session(self, client: Marionette) -> bool:
         """Put a fresh session into the page."""
         token = self._mint_id_token()
-        ok = bool(client.execute_script(SEED_SESSION_JS, [{"idToken": token, "refreshToken": self.cfg.refresh_token}]))
+        ok = bool(
+            client.execute_script(
+                SEED_SESSION_JS,
+                [{"idToken": token, "refreshToken": self.cfg.refresh_token}],
+            )
+        )
         self.log_event("login", f"session seeded (token length {len(token)})")
         return ok
 
@@ -214,21 +205,22 @@ class WebBot:
             if not element:
                 return False
             client.send("WebDriver:SwitchToFrame", {"element": element})
-            box = client.send(
-                "WebDriver:FindElement",
-                {"using": "css selector", "value": "input[type=checkbox], label, .cb-lb"},
-            )
-            target = box.get(ELEMENT_KEY) or box.get("value", {}).get(ELEMENT_KEY)
-            if target:
-                client.send("WebDriver:ElementClick", {"id": target})
-                client.send("WebDriver:SwitchToParentFrame", {})
-                return True
+            try:
+                box = client.send(
+                    "WebDriver:FindElement",
+                    {"using": "css selector", "value": "input[type=checkbox], label, .cb-lb"},
+                )
+                target = box.get(ELEMENT_KEY) or box.get("value", {}).get(ELEMENT_KEY)
+                if target:
+                    client.send("WebDriver:ElementClick", {"id": target})
+                    return True
+            finally:
+                try:
+                    client.send("WebDriver:SwitchToParentFrame", {})
+                except Exception:  # noqa: BLE001
+                    pass
         except Exception as exc:  # noqa: BLE001 - no challenge, or not clickable
             log.debug("turnstile click failed: %s", exc)
-            try:
-                client.send("WebDriver:SwitchToParentFrame", {})
-            except Exception:  # noqa: BLE001
-                pass
         return False
 
     # ------------------------------------------------------------------
@@ -237,16 +229,16 @@ class WebBot:
         if client.execute_script(HAS_SESSION_JS):
             return True
 
-        # A refreshToken is enough: it mints idTokens without a browser.
         if self.cfg.refresh_token:
             try:
                 if self._seed_session(client):
-                    time.sleep(2)
+                    self.stop_event.wait(2)
                     if client.execute_script(HAS_SESSION_JS):
                         return True
             except Exception as exc:  # noqa: BLE001 - network hiccup
                 self.log_event("warn", f"session seeding failed: {exc}")
-                return False
+                if not (self.cfg.email and self.cfg.password):
+                    return False
 
         if not (self.cfg.email and self.cfg.password):
             self.log_event("login", "no session yet - log in once in the browser")
@@ -254,43 +246,43 @@ class WebBot:
 
         self.log_event("login", "logging in with the configured account")
 
-        # 1. the consent screen (age + terms) has to be accepted first
         self._click_text(client, ["I am 16", "I have read", "16 years", "agree"])
-        time.sleep(1)
+        if self.stop_event.wait(1):
+            return False
         self._click_text(client, ["Accept", "Đồng ý", "OK", "START GAME OK"])
-        time.sleep(2)
+        if self.stop_event.wait(2):
+            return False
 
-        # 2. open the login form
         opened = self._click_text(
             client, ["Log in", "Log In", "Login", "Sign in", "Sign In", "Đăng nhập"]
         )
         self.log_event("login", f"login form {'opened' if opened else 'not found'}")
-        time.sleep(3)
+        if self.stop_event.wait(3):
+            return False
 
-        # 3. fill the form
         filled_email = client.execute_script(FILL_JS, ["email", self.cfg.email])
         filled_password = client.execute_script(FILL_JS, ["password", self.cfg.password])
         self.log_event(
             "login", f"form filled (email={filled_email}, password={filled_password})"
         )
-        time.sleep(1)
+        if self.stop_event.wait(1):
+            return False
 
-        # 4. the Turnstile checkbox, if it is visible
         if self._solve_turnstile(client):
             self.log_event("login", "turnstile solved")
-            time.sleep(2)
+            if self.stop_event.wait(2):
+                return False
 
-        # 5. submit
         self._click_text(
             client, ["Log in", "Log In", "Login", "Sign in", "Continue", "Tiếp tục"]
         )
 
-        deadline = time.time() + self.cfg.request_timeout_sec * 3
-        while time.time() < deadline:
+        deadline = time.monotonic() + self.cfg.request_timeout_sec * 3
+        while time.monotonic() < deadline and not self.stop_event.is_set():
             if client.execute_script(HAS_SESSION_JS):
                 self.log_event("login", "login succeeded")
                 return True
-            time.sleep(2)
+            self.stop_event.wait(2)
 
         state = client.execute_script(PAGE_STATE_JS)
         self.log_event("warn", f"login did not complete; page: {json.dumps(state)[:600]}")
@@ -306,17 +298,17 @@ class WebBot:
 
     def _session(self) -> None:
         self.process = launch_headless()
-        if not wait_for_marionette():
+        if not wait_for_marionette(process=self.process):
             raise RuntimeError("marionette did not come up")
         self.client = Marionette()
         self.client.connect()
         self.client.new_session()
         self.client.set_script_timeout(30000)
         self.client.navigate(GAME_URL)
-        time.sleep(6)
+        if self.stop_event.wait(6):
+            return
 
         if not self._login(self.client):
-            # A failed login is retried by the supervisor (new browser).
             raise RuntimeError("login failed")
         self._inject(self.client)
         self.store.update(status="playing", last_error=None)
@@ -324,7 +316,8 @@ class WebBot:
 
         reinjections = 0
         while not self.stop_event.is_set():
-            time.sleep(5)
+            if self.stop_event.wait(5):
+                break
             try:
                 alive = bool(self.client.execute_script(PAYLOAD_ALIVE_JS))
             except Exception as exc:  # noqa: BLE001 - browser died
@@ -332,9 +325,6 @@ class WebBot:
                 break
 
             if not alive:
-                # Either the page reloaded (the payload is gone) or the
-                # payload crashed.  Re-inject first, restart the browser
-                # only when that keeps failing.
                 reinjections += 1
                 if reinjections > 3:
                     self.log_event("warn", "the payload keeps dying - restarting the browser")
@@ -347,8 +337,6 @@ class WebBot:
                 continue
             reinjections = 0
 
-            # The page cannot POST to the dashboard (CORS), so the
-            # supervisor picks the state and the events up directly.
             try:
                 snapshot = self.client.execute_script(PAYLOAD_STATE_JS)
             except Exception as exc:  # noqa: BLE001
@@ -364,60 +352,89 @@ class WebBot:
                 self.store.update(**fields)
             for event in snapshot.get("events") or []:
                 if isinstance(event, dict) and event.get("message"):
-                    self.store.add_event(
-                        str(event.get("level") or "info"), str(event["message"])
-                    )
+                    self.log_event(str(event.get("level") or "info"), str(event["message"]))
 
     # ------------------------------------------------------------------
     def log_event(self, kind: str, message: str) -> None:
         log.info("%s", message)
         self.store.add_event(kind, message)
+        if self.hub is not None:
+            try:
+                self.hub.publish("event", {"kind": kind, "message": message, "ts": time.time()})
+            except Exception:
+                pass
 
     def run(self) -> None:
-        start_dashboard(self.store, self.cfg.dashboard_host, self.cfg.dashboard_port)
-        self.log_event("bot", "web bot starting")
-        backoff = self.cfg.reconnect_delay_sec
-        while not self.stop_event.is_set():
-            try:
-                self._session()
-                backoff = self.cfg.reconnect_delay_sec
-            except Exception as exc:  # noqa: BLE001 - the supervisor never dies
+        server = start_dashboard(
+            self.store,
+            self.cfg.dashboard_host,
+            self.cfg.dashboard_port,
+            hub=self.hub,
+            token=getattr(self.cfg, "dashboard_token", ""),
+        )
+        try:
+            self.log_event("bot", "web bot starting")
+            backoff = self.cfg.reconnect_delay_sec
+            while not self.stop_event.is_set():
+                session_start = time.monotonic()
+                try:
+                    self._session()
+                    if self.stop_event.is_set():
+                        break
+                    if (time.monotonic() - session_start) >= max(60.0, self.cfg.reconnect_delay_sec):
+                        backoff = self.cfg.reconnect_delay_sec
+                except Exception as exc:  # noqa: BLE001 - the supervisor never dies
+                    self.store.update(
+                        status="error",
+                        last_error=str(exc),
+                        errors=self.store.get().get("errors", 0) + 1,
+                    )
+                    self.log_event("error", f"session failed: {exc}")
+                finally:
+                    if self.client is not None:
+                        try:
+                            self.client.delete_session()
+                        except Exception:  # noqa: BLE001
+                            pass
+                        try:
+                            self.client.close()
+                        except Exception:  # noqa: BLE001
+                            pass
+                        self.client = None
+                    stop(self.process)
+                    self.process = None
+                if self.stop_event.is_set():
+                    break
                 self.store.update(
-                    status="error", last_error=str(exc), errors=self.store.get().get("errors", 0) + 1
+                    status="reconnecting",
+                    reconnects=self.store.get().get("reconnects", 0) + 1,
                 )
-                self.log_event("error", f"session failed: {exc}")
-            finally:
-                if self.client is not None:
-                    try:
-                        self.client.close()
-                    except Exception:  # noqa: BLE001
-                        pass
-                    self.client = None
-                stop(self.process)
-                self.process = None
-            if self.stop_event.is_set():
-                break
-            self.store.update(
-                status="reconnecting",
-                reconnects=self.store.get().get("reconnects", 0) + 1,
-            )
-            self.log_event("bot", f"restarting in {backoff}s")
-            self.stop_event.wait(backoff)
-            backoff = min(backoff * 2, self.cfg.reconnect_delay_max_sec)
-        self.log_event("bot", "web bot stopped")
+                self.log_event("bot", f"restarting in {backoff}s")
+                self.stop_event.wait(backoff)
+                backoff = min(backoff * 2, self.cfg.reconnect_delay_max_sec)
+            self.log_event("bot", "web bot stopped")
+        finally:
+            try:
+                server.shutdown()
+            except Exception:
+                pass
+            try:
+                server.server_close()
+            except Exception:
+                pass
 
 
 def main() -> int:
     logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)-7s %(name)-12s %(message)s", datefmt="%H:%M:%S"
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)-7s %(name)-12s %(message)s",
+        datefmt="%H:%M:%S",
     )
     cfg = load_config()
     bot = WebBot(cfg)
 
     def _shutdown(signum, _frame):
         bot.stop_event.set()
-
-    import signal
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
