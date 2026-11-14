@@ -1,48 +1,41 @@
 # wv-web-bot - Wolvesville custom-game bot (web + websocket injection)
 
 Headless bot that plays Wolvesville custom games ("vill win" rooms) on its
-own.  The browser only does what a browser has to do (Cloudflare, the
-login); the game itself is played over socket.io from an injected script -
-the same technique the Zoro extension uses.
+own.  The browser handles Cloudflare and initial login; the game itself is
+driven over Socket.IO from an injected script (`payload.js`).
 
 ```
-node bot.mjs --login     # log in once in a visible browser, store the session
-node bot.mjs             # run headless, 24/7
-node bot.mjs --headed    # run with a visible browser (debugging)
+node login.mjs             # open visible browser once, save session + tokens
+node bot.mjs               # run headless, 24/7
+node bot.mjs --headed      # run with a visible browser (debugging)
+node bot.mjs --login       # log in once with a visible browser and exit
+npm run dashboard          # run standalone status dashboard
+npm run check              # syntax-check all JS/MJS files
 ```
 
-The dashboard is at <http://127.0.0.1:8787/>.
+The dashboard is served on <http://127.0.0.1:8787/>.
 
 ## How it works
 
 | Piece | File | What it does |
 |---|---|---|
-| Browser supervisor | `bot.mjs` | Playwright Chromium, session handling, restart on failure |
-| Injected bot | `payload.js` | socket.io session, room list, join, vote, XP claim |
-| Status page | `dashboard.mjs` | `/` (auto refresh), `/api/status`, `/api/events` |
+| Browser supervisor | `bot.mjs` | Playwright Chromium, session handling, Node-side token minting, restart on failure |
+| Interactive login | `login.mjs` | Opens visible browser to capture `state/auth.json` and `state/tokens.json` (mode `0600`) |
+| Injected bot | `payload.js` | Lobby/game Socket.IO handler, room filter, `mg:join-open-game`, voting, double-XP claim |
+| Status page | `dashboard.mjs` | `/` (auto-refresh), `/api/status`, `/api/events`, `/health` |
 
 `payload.js` is injected before any page script runs and:
 
-1. reads the firebase token from `localStorage['authtokens']` (fallback:
-   the firebase web session key),
-2. hooks `fetch()` to pick up the Cloudflare attestation token (`Cf-JWT`)
-   and to swallow the site's automation probes,
-3. hooks `MessageEvent.data` to learn the `game-joined` payload (game id +
-   game server URL),
-4. opens its **own** socket.io session against the game server with
-   `firebaseToken`, `gameId`, `ids`, `apiV` and `Cf-JWT`,
-5. lists the open custom rooms, joins one that matches `room_names`,
-6. plays: votes during the day, kills during the night, claims double XP
-   when the award allows it,
-7. rejoins automatically after every game and after every kick.
+1. obtains the Firebase `idToken` from `localStorage['authtokens']` or via `window.__wvMintIdToken()` on the Node host,
+2. hooks `fetch()` to capture the Cloudflare attestation header (`Cf-JWT`) and mask web-automation probes,
+3. connects to the Wolvesville game gateway Socket.IO server (`https://game.api-wolvesville.com`), lists open custom rooms, and joins matching rooms via `mg:join-open-game`,
+4. plays day voting, night werewolf voting, and single-use killer actions directly over that lobby socket,
+5. claims double XP when `canClaimDoubleXp` is offered, emits `mg:exit-game` cleanly after game over, and rejoins the next room.
 
 ### Protocol notes
 
-* Votes and other game actions are sent as **JSON strings**
-  (`socket.emit("game-day-vote-set", JSON.stringify({ targetPlayerId }))`);
-  only `videoAdClaimReward` takes a plain object.
-* Role metadata comes from `localStorage['roles-meta-data'].roles[roleId]`
-  (`team` is `VILLAGER` or `WEREWOLF`).
+* Game actions are sent as **JSON strings** (`socket.emit("game-day-vote-set", JSON.stringify({ targetPlayerId }))`); only `videoAdClaimReward` and `mg:*` room control messages take plain objects.
+* Role metadata comes from `localStorage['roles-meta-data'].roles[roleId]` (`team` is `VILLAGER` or `WEREWOLF`).
 * `game-players-killed` -> `{victims: [{targetPlayerId, ...}]}`
 * `game-werewolves-set-roles` -> `{werewolves: {playerId: roleId}}`
 * `game-cupid-lover-ids-and-roles` -> `{loverPlayerIds: [], loverRoles: []}`
@@ -62,22 +55,17 @@ The dashboard is at <http://127.0.0.1:8787/>.
 }
 ```
 
-`email`/`password` are optional.  Without them the bot opens a visible
-browser once and waits for you to log in - the password is then never
-stored anywhere.  The resulting session lives in `state/auth.json`
-(git-ignored).
+`email`/`password` are optional.  Without them, run `npm run login` (`node login.mjs`) to sign in interactively in a visible browser window; the session is stored in `state/auth.json` and `state/tokens.json` (git-ignored, `0600` permissions).
 
 ## Requirements
 
-* Node 18+ (`node --version`)
+* Node 20+ (`node --version`, required by `playwright@^1.64.1`)
 * `npm install && npx playwright install chromium`
 
-## Docker (optional)
+## Docker (root Python runner)
+
+Container deployment is configured at the repository root (`Dockerfile` and `docker-compose.yml`) for the Python protocol/farm runner:
 
 ```bash
-docker build -t wv-web-bot .
-docker run -d --name wv-bot -p 8787:8787 -v "$PWD/state:/app/state" wv-web-bot
+docker compose up -d
 ```
-
-For the interactive login use `docker run -it --rm -v "$PWD/state:/app/state" wv-web-bot node bot.mjs --login`
-with the port of the container published.

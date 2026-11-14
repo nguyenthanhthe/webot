@@ -6,10 +6,12 @@
  */
 
 import http from "node:http";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const MAX_EVENTS = 200;
 
-export function createDashboard({ host = "0.0.0.0", port = 8787 } = {}) {
+export function createDashboard({ host = "127.0.0.1", port = 8787 } = {}) {
   const startedAt = Date.now();
   const state = {
     status: "starting",
@@ -58,7 +60,7 @@ export function createDashboard({ host = "0.0.0.0", port = 8787 } = {}) {
  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px}
  .card{background:#1b1f27;border:1px solid #262c37;border-radius:10px;padding:12px 14px}
  .k{color:#8b93a7;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
- .v{font-size:22px;font-weight:600;margin-top:2px}
+ .v{font-size:22px;font-weight:600;margin-top:2px;overflow-wrap:anywhere}
  .ok{color:#5ad07a}.warn{color:#f2c14e}.bad{color:#e56a6a}
  #events{margin-top:20px;background:#1b1f27;border:1px solid #262c37;border-radius:10px;padding:12px 14px;max-height:320px;overflow:auto}
  #events div{font-family:ui-monospace,Consolas,monospace;font-size:12px;color:#aeb6c8;padding:2px 0}
@@ -72,29 +74,48 @@ async function tick(){
   try{
     const s=await (await fetch('/api/status')).json();
     const g=document.getElementById('grid');
-    g.innerHTML=fields.map(([k,l])=>{
+    const cards=fields.map(([k,l])=>{
       let v=s[k]; v=(v===null||v===undefined)?'-':v;
-      let cls='';
-      if(k==='status') cls= v==='playing'?'ok':(v==='error'?'bad':'warn');
-      if(k==='errors'&&+v>0) cls='bad';
-      return '<div class="card"><div class="k">'+l+'</div><div class="v '+cls+'">'+String(v).slice(0,40)+'</div></div>';
-    }).join('');
-    document.getElementById('up').textContent='· uptime '+s.uptime_sec+'s';
+      const card=document.createElement('div');
+      card.className='card';
+      const kEl=document.createElement('div');
+      kEl.className='k';
+      kEl.textContent=l;
+      const vEl=document.createElement('div');
+      let cls='v';
+      if(k==='status') cls+=' '+(v==='playing'?'ok':(v==='error'?'bad':'warn'));
+      if(k==='errors'&&+v>0) cls+=' bad';
+      vEl.className=cls;
+      vEl.textContent=String(v).slice(0,40);
+      card.append(kEl,vEl);
+      return card;
+    });
+    g.replaceChildren(...cards);
+    document.getElementById('up').textContent='\u00b7 uptime '+s.uptime_sec+'s';
     const ev=await (await fetch('/api/events')).json();
-    document.getElementById('events').innerHTML=ev.map(e=>'<div>'+new Date(e.t).toLocaleTimeString()+' ['+e.kind+'] '+e.message+'</div>').join('');
-  }catch(e){document.getElementById('up').textContent='· offline ('+e.message+')';}
+    const rows=ev.map(e=>{
+      const row=document.createElement('div');
+      row.textContent=new Date(e.t).toLocaleTimeString()+' ['+String(e.kind||'')+'] '+String(e.message||'');
+      return row;
+    });
+    document.getElementById('events').replaceChildren(...rows);
+  }catch(e){document.getElementById('up').textContent='\u00b7 offline ('+String(e&&e.message||e)+')';}
 }
 tick();setInterval(tick,2000);
 </script></body></html>`;
 
   const server = http.createServer((req, res) => {
-    if (req.url === "/api/status") {
+    const pathname = new URL(req.url || "/", "http://127.0.0.1").pathname;
+    if (pathname === "/health") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+    } else if (pathname === "/api/status") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(snapshot(), null, 2));
-    } else if (req.url === "/api/events") {
+    } else if (pathname === "/api/events") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(events.slice(-100)));
-    } else if (req.url === "/" || req.url === "/index.html") {
+    } else if (pathname === "/" || pathname === "/index.html") {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       res.end(page);
     } else {
@@ -117,4 +138,20 @@ tick();setInterval(tick,2000);
       }),
     close: () => new Promise((resolve) => server.close(resolve)),
   };
+}
+
+const isMain =
+  Boolean(process.argv[1]) &&
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (isMain) {
+  const argv = process.argv.slice(2);
+  const hostIdx = argv.indexOf("--host");
+  const portIdx = argv.indexOf("--port");
+  const host = hostIdx !== -1 && argv[hostIdx + 1] ? argv[hostIdx + 1] : "127.0.0.1";
+  const port = portIdx !== -1 && argv[portIdx + 1] ? Number(argv[portIdx + 1]) : 8787;
+  const dash = createDashboard({ host, port });
+  dash.listen().then(() => {
+    console.log(`Dashboard listening on http://${host}:${port}/`);
+  });
 }

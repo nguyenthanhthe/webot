@@ -18,16 +18,8 @@ for name in wvbot.zip deploy.sh termux_run.sh refresh_token.txt bot_start.sh; do
   fi
 done
 
-# The helper scripts live in the home directory so they can be run from
-# anywhere: sh ~/bot_start.sh
-if [ -f "$STAGE/bot_start.sh" ]; then
-  cp "$STAGE/bot_start.sh" "$HOME_DIR/bot_start.sh"
-  chmod 700 "$HOME_DIR/bot_start.sh"
-fi
-if [ -f "$STAGE/deploy.sh" ]; then
-  cp "$STAGE/deploy.sh" "$HOME_DIR/deploy.sh"
-  chmod 700 "$HOME_DIR/deploy.sh"
-fi
+chmod 700 "$HOME_DIR/bot_start.sh" "$HOME_DIR/deploy.sh" 2>/dev/null || true
+chmod 600 "$HOME_DIR/refresh_token.txt" 2>/dev/null || true
 
 # The service runner, the control script and the boot hook.
 # The runner is what the Termux background service executes, so the bot

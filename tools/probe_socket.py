@@ -1,43 +1,40 @@
-"""Probe the socket.io lobby from the phone (Termux).
+"""Probe the socket.io lobby and custom game flow from the phone (Termux).
 
 Run inside Termux:
-    python3 probe_socket.py
-
-It checks:
-  1. can the phone open the lobby socket (Engine.IO over websocket)?
-  2. what does the server answer - open games, or a Cloudflare error?
-  3. can the bot join a room and reach the game socket?
+    python3 probe_socket.py [--wait SEC]
 """
 
 from __future__ import annotations
 
+import argparse
 import json
+import random
 import sys
 import time
-import unicodedata
+import uuid
+from pathlib import Path
 
-sys.path.insert(0, ".")
+_HERE = Path(__file__).resolve().parent
+_ROOT = _HERE if (_HERE / "wvbot").is_dir() else _HERE.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
-from wvbot.config import load_config, state_path  # noqa: E402
+from wvbot.api import fold  # noqa: E402
+from wvbot.config import load_config  # noqa: E402
 from wvbot.http_client import HttpClient  # noqa: E402
 from wvbot.sio import SocketIOClient  # noqa: E402
 
 GAME_HOST = "https://game.api-wolvesville.com"
 
 
-def fold(value: str) -> str:
-    """Fold a room name to plain ASCII, so "VİLL WİN" matches "vill win"."""
-    text = str(value or "").replace("İ", "I").replace("ı", "i")
-    text = "".join(c for c in unicodedata.normalize("NFD", text) if not unicodedata.combining(c))
-    return text.lower().strip()
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Probe Wolvesville Socket.IO custom-game join")
+    parser.add_argument("--wait", type=float, default=12.0, help="Seconds to observe events after joining")
+    args = parser.parse_args(argv)
 
-
-
-def main() -> int:
     cfg = load_config()
     client = HttpClient()
     print("client.allowed_hosts:", sorted(client.allowed_hosts))
-    print("client module:", type(client).__module__, type(client).__module__ and sys.modules[type(client).__module__].__file__)
     try:
         data = client.request(
             "POST",
@@ -46,14 +43,11 @@ def main() -> int:
         )
     except Exception as exc:  # noqa: BLE001
         print("request failed:", exc)
-        print("allowed_hosts now:", sorted(client.allowed_hosts))
-        print("module file:", sys.modules[type(client).__module__].__file__)
-        raise
+        return 1
 
     token = (data or {}).get("idToken", "")
     print(f"idToken length {len(token)}")
 
-    # The rooms come and go, so keep looking for a while.
     wanted = [fold(name) for name in cfg.room_names]
     matching: list[dict] = []
     games: list[dict] = []
@@ -77,35 +71,33 @@ def main() -> int:
             break
         time.sleep(10)
 
-
     if not matching:
         print("no matching room - nothing to join")
         return 1
 
     target = matching[0]
     game_id = target.get("gameId") or target.get("id")
-    print(f"\n== game socket for {target.get('name')!r} (id={game_id}) ==")
+    print(f"\n== joining {target.get('name')!r} (id={game_id}) via lobby socket ==")
 
-    # A custom game is entered directly: the game socket carries the
-    # game id and the mode, there is no lobby step.
     socket = SocketIOClient(
         GAME_HOST,
         query={
-            "gameId": game_id,
-            "gameMode": "custom",
-            "reconnect": "true",
+            "firebaseToken": token,
             "ids": 1,
             "apiV": 1,
+            "b": random.SystemRandom().randint(42, 99),
+            "deviceId": str(uuid.uuid4()),
         },
         auth={"firebaseToken": token},
+        headers={"Origin": "https://app.wolvesville.com"},
     )
     seen: list[str] = []
     started: dict[str, object] = {}
 
-    def on_any(event: str, *args: object) -> None:
+    def on_any(event: str, *event_args: object) -> None:
         seen.append(event)
-        payload = args[0] if args else None
-        if event.startswith("game-") or event.startswith("error-"):
+        payload = event_args[0] if event_args else None
+        if event.startswith("game-") or event.startswith("error-") or event.startswith("mg:"):
             print(f"  event {event}: {str(payload)[:250]}")
         if event == "game-started":
             started["payload"] = payload
@@ -113,16 +105,23 @@ def main() -> int:
     socket.on_any(on_any)
     try:
         socket.start()
+        time.sleep(getattr(cfg, "socket_join_delay_sec", 1.0))
+        socket.emit("mg:join-open-game", {"miniGameId": game_id})
     except Exception as exc:  # noqa: BLE001
-        print(f"connect failed: {exc}")
+        print(f"connect/join failed: {exc}")
+        socket.close()
         return 1
 
-    print("connected, waiting for the game to start...")
-    time.sleep(12)
+    print("connected, waiting for game events...")
+    time.sleep(max(1.0, args.wait))
     print(f"events seen: {len(seen)}")
     print(f"first events: {seen[:25]}")
     if started:
         print(f"game-started: {json.dumps(started.get('payload'))[:800]}")
+    try:
+        socket.emit("mg:exit-game")
+    except Exception:
+        pass
     socket.close()
     return 0
 

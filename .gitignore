@@ -1,6 +1,13 @@
-# Python cache
+# Python cache & virtual environments
 __pycache__/
 *.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# Local runtime state & secrets
+data/
+.env
 
 # Node
 node_modules/

@@ -15,9 +15,11 @@
  */
 
 import { chromium } from "playwright";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+
+const PRINT_TOKEN = process.argv.includes("--print-token");
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const STATE_DIR = path.join(HERE, "state");
@@ -143,14 +145,36 @@ async function main() {
     process.exit(1);
   }
 
+  mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
+  try {
+    chmodSync(STATE_DIR, 0o700);
+  } catch {
+    /* ignore */
+  }
   await context.storageState({ path: AUTH_FILE });
+  try {
+    chmodSync(AUTH_FILE, 0o600);
+  } catch {
+    /* ignore */
+  }
   writeFileSync(
     TOKENS_FILE,
     JSON.stringify({ ...tokens, savedAt: Date.now() }, null, 2),
+    { mode: 0o600 },
   );
+  try {
+    chmodSync(TOKENS_FILE, 0o600);
+  } catch {
+    /* ignore */
+  }
   console.log(`session saved to ${AUTH_FILE}`);
-  console.log("\n=== refresh token (for the phone) ===");
-  console.log(tokens.refreshToken);
+  console.log(`tokens saved to ${TOKENS_FILE}`);
+  if (PRINT_TOKEN) {
+    console.log("\n=== refresh token (for the phone) ===");
+    console.log(tokens.refreshToken);
+  } else {
+    console.log("Pass --print-token if you want to display the raw refresh token on stdout.");
+  }
   await context.close();
 }
 

@@ -150,27 +150,23 @@ value:
     - `POST /api/accounts`: Hot-add account to roster and dynamic live bot slot launch in running Farm.
     - `DELETE /api/accounts/<name>`: Clean removal from roster and graceful thread termination.
     - Dashboard Web UI: Interactive Farm Roster & Accounts management table, modal form, and real-time live sync.
-12. ~~**End-to-End Account Provisioning Pipeline (Cloudflare Temp Email)**~~ - **done (v1.0.2).**
+12. ~~**End-to-End Account Provisioning Pipeline (Mail.tm & Cloudflare Temp Email)**~~ - **done (v1.0.2 / v1.1.0).**
     - Architecture blueprint: `docs/ACCOUNT-CREATION-PIPELINE.md`.
-    - Pure stdlib client: `tools/temp_email.py` (`TempEmailClient`).
-    - Automated mailbox creation (`/admin/new_address`) and inbox listener for verification codes (`/api/parsed_mails`).
-    - Verified with unit tests (`tests/test_temp_email.py`).
-13. ~~**Deterministic Instant Reflex Engine & Deep Role Expansion**~~ - **done (v1.0.3).**
-    - Pure Python stdlib regex reflex engine (`wvbot/reflex.py`, 0.1ms latency, zero AI/LLM overhead).
+    - Pure stdlib clients: `wvbot/temp_email.py` (`MailTmClient` + `TempEmailClient`) and `tools/temp_email.py` CLI wrapper.
+    - Automated mailbox creation (`api.mail.tm` or Cloudflare `/admin/new_address`), inbox listener for verification codes, and `AccountProvisioner` (`wvbot/provision.py`) requiring explicit browser `register_fn` callback (no Turnstile bypasses).
+    - Verified with unit tests (`tests/test_temp_email.py`, `tests/test_provision.py`).
+13. ~~**Deterministic Instant Reflex Engine & Deep Role Expansion**~~ - **done (v1.0.3 - v1.0.8).**
+    - Pure Python stdlib regex reflex engine (`wvbot/reflex.py`, 0.1ms latency, zero AI/LLM overhead), role claim deduplication, and universal role-claim replies.
     - Bot-check evasion: responds to username mentions, seat number inquiries, and general AFK queries with realistic slang and human typing jitter.
     - Deterministic Role Engine: Medium (`game-medium-revive-player`), Seer (`game-seer-reveal-player`), Doctor/Bodyguard priority protection for key assets.
-    - Safe Killer Discipline: Suppresses blind firing by Gunner/Priest/Vigilante in vill-win lobbies to avoid griefing and account blacklisting.
+    - Safe Killer Discipline & Turbo Vill-Win (`vill_win_mode`, `wolf_self_claim`, `instant_kill`, `stay_in_room`, 8P/TF filters).
     - Human Bio-Break Fatigue Simulator: Breaks robotic 24/7 telemetry with natural pauses every 10-12 consecutive matches.
+14. ~~**Watchdog Stale-Heartbeat Kill Drill**~~ - **done (`tools/drill_watchdog.py --drill`).**
+    - Non-destructive `--check` and stale-heartbeat `--drill` modes targeting configurable `--serial` / `WV_ADB_SERIAL`.
 
 What could come next, in the order of value:
 
-* **A kill drill for the hang watchdog** - write a stale heartbeat by
-  hand, run `sh ~/service/watchdog.sh` and watch it restart a hung
-  bot.  The drill ends a game ungracefully (SIGKILL), so it also runs
-  only while the bot waits for a room.
-* **A second config profile** for a second account (the dual-instance
-  idea without the second session in the same room).  Needs the
-  operator: a second manual browser login produces the token.
+* **Browser-backed registration helper (`register_fn`)** integrated into an operator-supervised login/signup UI when creating fresh accounts interactively.
 
 ## What we deliberately do not copy
 

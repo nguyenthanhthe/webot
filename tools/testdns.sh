@@ -9,7 +9,7 @@ try() {
     printf 'options usevc\n' >> "$PREFIX/etc/resolv.conf"
   fi
   printf '%-18s %-4s -> ' "$1" "${2:-udp}"
-  python3.14 -c "import socket;print(socket.gethostbyname('game.api-wolvesville.com'))" 2>&1 | tail -1
+  python3 -c "import socket;print(socket.gethostbyname('game.api-wolvesville.com'))" 2>&1 | tail -1
 }
 
 try 192.168.1.1 udp

@@ -1,73 +1,135 @@
-"""Package the bot into a zip that can be dropped into Termux.
+"""Package webot / wvbot into a zip archive for Termux deployment.
 
-    python wv-bot/tools/package.py
+    python tools/package.py          # build wvbot.zip
+    python tools/package.py --check  # verify manifest completeness only
 
-The archive contains the ``wvbot`` package, the ``run.py`` launcher and a
-default ``config.json``.  It is copied to the phone and unpacked into
-``~/wv-bot`` by the Termux profile hook.
+The archive contains the entire ``wvbot`` package, ``run.py``, ``setcreds.py``,
+``config.json``, phone diagnostic helpers, and ``payload.js``.  ``deploy.py``
+and ``deploy_phone.sh`` copy and unpack it into ``~/wv-bot`` on the device.
 """
 
 from __future__ import annotations
 
+import argparse
 import hashlib
+import sys
 import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "wvbot.zip"
 
-MEMBERS = [
-    (ROOT / "wvbot" / "__init__.py", "wvbot/__init__.py"),
-    (ROOT / "wvbot" / "__main__.py", "wvbot/__main__.py"),
-    (ROOT / "wvbot" / "api.py", "wvbot/api.py"),
-    (ROOT / "wvbot" / "auth.py", "wvbot/auth.py"),
-    (ROOT / "wvbot" / "bot.py", "wvbot/bot.py"),
-    (ROOT / "wvbot" / "config.py", "wvbot/config.py"),
-    (ROOT / "wvbot" / "dashboard.py", "wvbot/dashboard.py"),
-    (ROOT / "wvbot" / "farm.py", "wvbot/farm.py"),
-    (ROOT / "wvbot" / "firefox.py", "wvbot/firefox.py"),
-    (ROOT / "wvbot" / "game.py", "wvbot/game.py"),
-    (ROOT / "wvbot" / "http_client.py", "wvbot/http_client.py"),
-    (ROOT / "wvbot" / "history.py", "wvbot/history.py"),
-    (ROOT / "wvbot" / "marionette.py", "wvbot/marionette.py"),
-    (ROOT / "wvbot" / "netfix.py", "wvbot/netfix.py"),
-    (ROOT / "wvbot" / "rewards.py", "wvbot/rewards.py"),
-    (ROOT / "wvbot" / "sio.py", "wvbot/sio.py"),
-    (ROOT / "wvbot" / "stream.py", "wvbot/stream.py"),
-    (ROOT / "wvbot" / "updates.py", "wvbot/updates.py"),
-    (ROOT / "wvbot" / "ws.py", "wvbot/ws.py"),
-    (ROOT / "wvbot" / "webbot.py", "wvbot/webbot.py"),
-    (ROOT / "wvbot" / "reflex.py", "wvbot/reflex.py"),
-    (ROOT / "wvbot" / "provision.py", "wvbot/provision.py"),
-    (ROOT / "wvbot" / "temp_email.py", "wvbot/temp_email.py"),
-    (ROOT / "run.py", "run.py"),
-    (ROOT / "setcreds.py", "setcreds.py"),
-    (ROOT / "config.json", "config.json"),
-    # A small diagnostic that checks the API from the phone itself.
-    (ROOT / "tools" / "probe_phone.py", "probe_phone.py"),
-    (ROOT / "tools" / "probe_socket.py", "probe_socket.py"),
-    (ROOT / "tools" / "check_hosts.py", "check_hosts.py"),
-    (ROOT / "tools" / "show_lines.py", "show_lines.py"),
-    (ROOT / "tools" / "probe_own_id.py", "probe_own_id.py"),
-    (ROOT / "tools" / "probe_rewards.py", "probe_rewards.py"),
-    (ROOT / "tools" / "roster.py", "roster.py"),
-    (ROOT / "tools" / "drill_watchdog.py", "drill_watchdog.py"),
-    (ROOT / "tools" / "temp_email.py", "temp_email.py"),
-    # The payload is shared with the Node/Playwright runner and lives at the
-    # root of the package on the phone.
-    (ROOT / "web" / "payload.js", "payload.js"),
-]
+ROOT_FILES = (
+    "run.py",
+    "setcreds.py",
+    "config.json",
+)
+
+TOOL_FILES = (
+    "probe_phone.py",
+    "probe_socket.py",
+    "check_hosts.py",
+    "show_lines.py",
+    "probe_own_id.py",
+    "probe_rewards.py",
+    "roster.py",
+    "drill_watchdog.py",
+    "temp_email.py",
+)
 
 
-def main() -> None:
-    with zipfile.ZipFile(OUT, "w", zipfile.ZIP_DEFLATED) as zf:
-        for path, arcname in MEMBERS:
-            if not path.is_file():
-                raise SystemExit(f"missing member: {path}")
+def build_members(root: Path = ROOT) -> list[tuple[Path, str]]:
+    """Return ordered (source_path, archive_name) pairs for wvbot.zip."""
+    wvbot_dir = root / "wvbot"
+    members: list[tuple[Path, str]] = [
+        (path, f"wvbot/{path.name}")
+        for path in sorted(wvbot_dir.glob("*.py"))
+    ]
+    for name in ROOT_FILES:
+        members.append((root / name, name))
+    for name in TOOL_FILES:
+        members.append((root / "tools" / name, name))
+    members.append((root / "web" / "payload.js", "payload.js"))
+    return members
+
+
+MEMBERS = build_members()
+
+
+def verify_manifest(
+    members: list[tuple[Path, str]] | None = None,
+    root: Path = ROOT,
+) -> list[str]:
+    """Validate that all wvbot modules exist and there are no duplicates."""
+    entries = build_members(root) if members is None else members
+    errors: list[str] = []
+    seen_arc: set[str] = set()
+    seen_src: set[Path] = set()
+
+    for path, arcname in entries:
+        resolved = path.resolve()
+        if arcname in seen_arc:
+            errors.append(f"duplicate archive entry: {arcname}")
+        seen_arc.add(arcname)
+        if resolved in seen_src:
+            errors.append(f"duplicate source path: {path}")
+        seen_src.add(resolved)
+        if not path.is_file():
+            errors.append(f"missing member: {path}")
+
+    expected_pkg = {f"wvbot/{p.name}" for p in sorted((root / "wvbot").glob("*.py"))}
+    missing_pkg = sorted(expected_pkg - seen_arc)
+    for item in missing_pkg:
+        errors.append(f"missing wvbot module from manifest: {item}")
+
+    return errors
+
+
+def build_zip(output: Path = OUT, root: Path = ROOT) -> Path:
+    """Create the deployment zip after verifying its manifest."""
+    members = build_members(root)
+    errors = verify_manifest(members, root=root)
+    if errors:
+        raise RuntimeError("; ".join(errors))
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as zf:
+        for path, arcname in members:
             zf.write(path, arcname)
-    digest = hashlib.sha256(OUT.read_bytes()).hexdigest()
-    print(f"{OUT}  {OUT.stat().st_size} bytes  sha256={digest}")
+    return output
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Package wvbot for Termux deployment")
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Verify manifest completeness without writing wvbot.zip",
+    )
+    parser.add_argument(
+        "--output",
+        "-o",
+        type=Path,
+        default=OUT,
+        help="Output archive path (default: wvbot.zip at repo root)",
+    )
+    args = parser.parse_args(argv)
+
+    members = build_members(ROOT)
+    errors = verify_manifest(members, root=ROOT)
+    if errors:
+        for err in errors:
+            print(f"ERROR: {err}", file=sys.stderr)
+        return 1
+
+    if args.check:
+        print(f"manifest OK ({len(members)} members)")
+        return 0
+
+    archive = build_zip(output=args.output, root=ROOT)
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    print(f"{archive}  {archive.stat().st_size} bytes  sha256={digest}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

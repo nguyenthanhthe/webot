@@ -252,8 +252,8 @@ GET {core}/players/meAndCheckAppVersion
 
 ## 6. What the official bot (Zoro) does - and where it is wrong
 
-`D:\Users\Admin\Downloads\Zoro bot\Zoro bot` is a Chrome extension that
-injects a socket.io client into the page and plays custom games:
+The third-party Zoro Chrome extension injects a socket.io client into the page
+and plays custom games:
 
 * it hooks `MessageEvent.prototype.data` to read the page's own frames
   (that is how it learns `gameId`/`serverUrl`),
@@ -325,7 +325,7 @@ then:
    answers `error-game-connection-lost` on every join.
 3. **Fix the code + the tests together** (`tests/` covers the payload
    parsing and every event), run `python -m unittest discover -s
-   tests`, deploy with `python wv-bot/tools/deploy.py`.
+   tests`, deploy with `python tools/deploy.py`.
 4. **The room list fields** (`regularXp` is a boolean flag) live in
    `docs/RE-NOTES.md` - re-measure them with the `/api/rooms` gateway
    if the room list shape changed.
