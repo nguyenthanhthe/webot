@@ -15,12 +15,15 @@ from __future__ import annotations
 import http.client
 import json
 import logging
+import shutil
+import socket
 import subprocess
 import time
+from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
-from .ws import WebSocket
+from .ws import WebSocket, WebSocketError
 
 log = logging.getLogger("wvbot.cdp")
 
@@ -29,6 +32,21 @@ CHROME_PATHS = (
     r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
     r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
     r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+    "/usr/bin/google-chrome",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    "/usr/bin/microsoft-edge",
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+)
+
+CHROME_BINARIES = (
+    "google-chrome",
+    "chromium",
+    "chromium-browser",
+    "chrome",
+    "msedge",
+    "microsoft-edge",
 )
 
 # The DevTools endpoint only ever lives on the loopback interface of this
@@ -41,16 +59,18 @@ class CdpError(RuntimeError):
 
 
 def find_browser() -> str | None:
-    from pathlib import Path
-
     for candidate in CHROME_PATHS:
         if Path(candidate).is_file():
             return candidate
+    for binary in CHROME_BINARIES:
+        found = shutil.which(binary)
+        if found:
+            return found
     return None
 
 
 def _validate_port(port: int) -> int:
-    if not isinstance(port, int) or not (1 <= port <= 65535):
+    if isinstance(port, bool) or not isinstance(port, int) or not (1 <= port <= 65535):
         raise CdpError(f"invalid devtools port: {port!r}")
     return port
 
@@ -83,7 +103,10 @@ class Chrome:
         try:
             connection.request(method, path)
             response = connection.getresponse()
-            return response.read().decode("utf-8", "replace")
+            body = response.read().decode("utf-8", "replace")
+            if response.status >= 400:
+                raise CdpError(f"HTTP {response.status} for {method} {path}: {body[:200]}")
+            return body
         finally:
             connection.close()
 
@@ -94,13 +117,18 @@ class Chrome:
         command = [
             binary,
             f"--remote-debugging-port={self.port}",
-            f"--user-data-dir={self.user_data_dir}",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--disable-features=Translate,OptimizationHints",
-            "--window-size=1280,900",
-            "about:blank",
         ]
+        if self.user_data_dir:
+            command.append(f"--user-data-dir={self.user_data_dir}")
+        command.extend(
+            [
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--disable-features=Translate,OptimizationHints",
+                "--window-size=1280,900",
+                "about:blank",
+            ]
+        )
         if self.headless:
             command.append("--headless=new")
         log.info("launching browser: %s", " ".join(command))
@@ -111,13 +139,18 @@ class Chrome:
         )
 
     def wait_until_ready(self, timeout: float = 45.0) -> None:
-        deadline = time.time() + timeout
-        while time.time() < deadline:
+        deadline = time.monotonic() + max(0.0, timeout)
+        while time.monotonic() < deadline:
+            if self.process is not None and self.process.poll() is not None:
+                raise CdpError(f"browser exited early with code {self.process.returncode}")
             try:
                 self._http("GET", "/json/version")
                 return
             except Exception:  # noqa: BLE001 - browser not up yet
-                time.sleep(1)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(1.0, remaining))
         raise CdpError("browser did not expose the devtools port")
 
     # ------------------------------------------------------------------
@@ -126,7 +159,8 @@ class Chrome:
         return data if isinstance(data, list) else []
 
     def new_tab(self, url: str = "about:blank") -> str:
-        data = json.loads(self._http("PUT", f"/json/new?{url}"))
+        safe_url = quote(url, safe=":/?=&%#")
+        data = json.loads(self._http("PUT", f"/json/new?{safe_url}"))
         return str(data["webSocketDebuggerUrl"])
 
     def attach(self, ws_url: str) -> None:
@@ -153,20 +187,36 @@ class Chrome:
         message_id = self._id
         payload = json.dumps({"id": message_id, "method": method, "params": params or {}})
         self._ws.send_text(payload)
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            raw = self._ws.recv_text()
-            if raw is None:
-                raise CdpError("browser closed the connection")
-            try:
-                message = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            if message.get("id") == message_id:
-                if "error" in message:
-                    raise CdpError(f"{method} failed: {message['error']}")
-                return dict(message.get("result", {}))
-        raise CdpError(f"{method} timed out")
+        deadline = time.monotonic() + max(0.0, timeout)
+        sock = getattr(self._ws, "_sock", None)
+        prev_timeout = sock.gettimeout() if sock is not None else None
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise CdpError(f"{method} timed out")
+                if sock is not None:
+                    sock.settimeout(remaining)
+                try:
+                    raw = self._ws.recv_text()
+                except (TimeoutError, socket.timeout) as exc:
+                    raise CdpError(f"{method} timed out") from exc
+                if raw is None:
+                    raise CdpError("browser closed the connection")
+                try:
+                    message = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if message.get("id") == message_id:
+                    if "error" in message:
+                        raise CdpError(f"{method} failed: {message['error']}")
+                    return dict(message.get("result", {}))
+        finally:
+            if sock is not None:
+                try:
+                    sock.settimeout(prev_timeout)
+                except OSError:
+                    pass
 
     def navigate(self, url: str) -> None:
         self.send("Page.enable")
@@ -202,14 +252,17 @@ class Chrome:
             )
 
     def wait_for(self, expression: str, timeout: float = 30.0, interval: float = 0.5) -> bool:
-        deadline = time.time() + timeout
-        while time.time() < deadline:
+        deadline = time.monotonic() + max(0.0, timeout)
+        while time.monotonic() < deadline:
             try:
                 if self.evaluate(expression):
                     return True
-            except CdpError:
+            except (CdpError, WebSocketError, OSError):
                 pass
-            time.sleep(interval)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(interval, remaining))
         return False
 
     def close(self) -> None:
@@ -226,6 +279,7 @@ class Chrome:
             except Exception:  # noqa: BLE001
                 try:
                     self.process.kill()
+                    self.process.wait(timeout=5)
                 except Exception:  # noqa: BLE001
                     pass
             self.process = None
